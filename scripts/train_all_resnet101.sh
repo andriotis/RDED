@@ -14,8 +14,7 @@ echo "Training ResNet-101 observers for RDED Table 2"
 echo "Output: ./data/pretrain_models/"
 echo ""
 
-# cifar10 cifar100 tinyimagenet imagenet-nette imagenet-woof imagenet-100
-for ds in cifar100; do
+for ds in cifar10 cifar100 tinyimagenet imagenet-nette imagenet-woof imagenet-100; do
     if [[ -d "./data/$ds/train" ]]; then
         python scripts/train_resnet101_observer.py --dataset "$ds"
     else

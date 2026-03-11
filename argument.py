@@ -72,6 +72,45 @@ parser.add_argument(
     help="mixup or cutmix or None",
 )
 parser.add_argument(
+    "--use-occe",
+    action="store_true",
+    default=False,
+    help="enable KD + Soft-OCCE loss for student training",
+)
+parser.add_argument(
+    "--occe-gamma",
+    type=float,
+    default=0.1,
+    help="weight for the OCCE regularisation term: L = KL + gamma * L_OCCE (default: 0.1)",
+)
+parser.add_argument(
+    "--occe-mode",
+    type=str,
+    default="uniform",
+    choices=["uniform", "soft", "margin"],
+    help="OCCE target distribution: 'uniform' (U-OCCE, hard 1/(C-1)), 'soft' (S-OCCE, teacher-proportional), or 'margin' (M-OCCE, teacher logit-margin-proportional)",
+)
+parser.add_argument(
+    "--occe-temp-schedule",
+    type=str,
+    default="fixed",
+    choices=["fixed", "linear", "cosine"],
+    help="Temperature schedule for M-OCCE margin computation: 'fixed' keeps --occe-temp-start "
+         "constant, 'linear'/'cosine' anneal from --occe-temp-start to --occe-temp-final over training",
+)
+parser.add_argument(
+    "--occe-temp-start",
+    type=float,
+    default=None,
+    help="Starting temperature for M-OCCE annealing (defaults to --temperature if not set)",
+)
+parser.add_argument(
+    "--occe-temp-final",
+    type=float,
+    default=1.0,
+    help="Final temperature for M-OCCE annealing (default: 1.0; used only with linear/cosine schedule)",
+)
+parser.add_argument(
     "--stud-name",
     type=str,
     default="resnet18",
@@ -157,6 +196,7 @@ parser.add_argument(
     type=str,
     help="name of the experiment, subfolder under syn_data_path",
 )
+
 args = parser.parse_args()
 
 args.train_dir = f"./data/{args.subset}/train/"

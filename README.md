@@ -41,6 +41,28 @@ The main entry point of a single experiment is [`main.py`](main.py). To facilita
 bash ./scripts/imagenet-1k_10ipc_resnet-18_to_resnet-18_cr5.sh
 ```
 
+To evaluate the proposed **RDED+OCCE** variant during the post-evaluation (student training) stage and compare it against the paper's Table 2 results, you can use:
+
+```shell
+bash ./scripts/run_table2_occe.sh           # run OCCE experiments
+bash ./scripts/run_table2_occe.sh --results # show RDED (paper) vs RDED+OCCE table
+```
+
+The OCCE-aware student training is controlled by the following arguments (used internally by the script but also available for custom runs):
+
+- `--use-occe`: enable KD + OCCE loss for the student.
+- `--occe-gamma`: fixed weight for the OCCE regularisation term (default: `0.1`). The total loss is `L = KL + gamma * L_OCCE`. The OCCE loss is normalised by `log(C-1)` internally, making it scale-invariant across class counts so a single value of `0.1` works well in most settings.
+- `--occe-mode`: selects the OCCE target distribution (default: `uniform`):
+  - `uniform` (U-OCCE): assigns `1/(C-1)` to every non-true class.
+  - `soft` (S-OCCE): assigns probability proportional to the teacher's soft labels over non-true classes, using the teacher's dark knowledge.
+  - `margin` (M-OCCE): assigns probability proportional to `exp((z_k - z_c) / T)` for `k ≠ c`, where `z_k` are raw teacher logits. Preserves the relative similarity structure in the teacher's logit geometry, avoiding softmax saturation.
+- `--occe-temp-schedule`: temperature schedule for the M-OCCE margin computation (default: `fixed`). Only applies when `--occe-mode margin` is used. Choices:
+  - `fixed`: use a constant temperature equal to `--occe-temp-start` (or `--temperature` if not set).
+  - `linear`: anneal linearly from `--occe-temp-start` to `--occe-temp-final` over all epochs.
+  - `cosine`: anneal with a cosine schedule from `--occe-temp-start` to `--occe-temp-final`.
+- `--occe-temp-start`: starting temperature for M-OCCE annealing (default: uses `--temperature`). Ignored unless `--occe-temp-schedule` is `linear` or `cosine`.
+- `--occe-temp-final`: final temperature for M-OCCE annealing (default: `1.0`). Ignored unless `--occe-temp-schedule` is `linear` or `cosine`.
+
 ### Pre-trained Models
 Following [SRe$^2$L](https://github.com/VILA-Lab/SRe2L), we adapt official [Torchvision code](https://github.com/pytorch/vision/tree/main/references/classification) to train the observer models from scratch.
 All our pre-trained observer models listed below are available at [link](https://drive.google.com/drive/folders/1HmrheO6MgX453a5UPJdxPHK4UTv-4aVt?usp=drive_link).

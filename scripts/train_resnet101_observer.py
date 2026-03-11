@@ -40,12 +40,12 @@ DATASET_CONFIG = {
 def build_model(model_name: str, num_classes: int, device: torch.device) -> nn.Module:
     """Build ResNet-101 with correct architecture for dataset."""
     if model_name == "resnet101_modified":
-        model = models.resnet101(pretrained=False)
+        model = models.resnet101()
         model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         model.maxpool = nn.Identity()
         model.fc = nn.Linear(model.fc.in_features, num_classes)
     else:
-        model = models.resnet101(pretrained=False, num_classes=num_classes)
+        model = models.resnet101(num_classes=num_classes)
     return model.to(device)
 
 
