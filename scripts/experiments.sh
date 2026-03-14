@@ -63,6 +63,7 @@ ACTIONS:
   --results             Print the combined results table and exit
   --dry-run             Print experiment configs without running them
   --force               Re-run experiments even if logs already exist
+  --no-color            Disable ANSI color in results table (for pipes)
   -h, --help            Show this help message and exit
 
 EXAMPLES:
@@ -91,6 +92,7 @@ SEEDS="42"
 DRY_RUN=false
 SHOW_RESULTS=false
 FORCE=false
+NO_COLOR=false
 RE_EPOCHS=300
 NUM_CROP=5
 MIPC=300
@@ -115,6 +117,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)            DRY_RUN=true;           shift   ;;
         --results)            SHOW_RESULTS=true;      shift   ;;
         --force)              FORCE=true;             shift   ;;
+        --no-color)           NO_COLOR=true;          shift   ;;
         --re-epochs)          RE_EPOCHS="$2";         shift 2 ;;
         --mode)               MODE="$2";              shift 2 ;;
         --occe-gamma)         OCCE_GAMMA="$2";        shift 2 ;;
@@ -578,6 +581,46 @@ format_cell() {
     fi
 }
 
+# Extract numeric mean from "X ± Y" or "X" for comparison
+extract_mean() {
+    local val="$1"
+    if [[ -z "$val" || "$val" == "-" ]]; then
+        echo ""
+        return
+    fi
+    echo "$val" | grep -oE '[0-9]+\.?[0-9]*' | head -1
+}
+
+# Format cell with ANSI color: green if val > paper, red if val < paper
+format_cell_colored() {
+    local val="$1"
+    local paper_val="$2"
+    local formatted
+    formatted=$(format_cell "$val")
+
+    if [[ "$NO_COLOR" == true ]]; then
+        printf "%s" "$formatted"
+        return
+    fi
+
+    local val_mean paper_mean
+    val_mean=$(extract_mean "$val")
+    paper_mean=$(extract_mean "$paper_val")
+
+    if [[ -z "$val_mean" || -z "$paper_mean" ]]; then
+        printf "%s" "$formatted"
+        return
+    fi
+
+    if awk "BEGIN {exit !($val_mean > $paper_mean)}" 2>/dev/null; then
+        printf '\033[32m%s\033[0m' "$formatted"
+    elif awk "BEGIN {exit !($val_mean < $paper_mean)}" 2>/dev/null; then
+        printf '\033[31m%s\033[0m' "$formatted"
+    else
+        printf "%s" "$formatted"
+    fi
+}
+
 extract_best_acc() {
     local log_file="$1"
     if [[ ! -f "$log_file" ]]; then
@@ -733,9 +776,9 @@ print_results_table() {
 
             printf "│ %-13s │ %3d │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │\n" \
                 "$label" "$ipc" \
-                "$(format_cell "$paper_conv")"  "$(format_cell "$base_conv")"  "$(format_cell "$uocce_conv")"  "$(format_cell "$socce_conv")"  "$(format_cell "$mocce_conv")" \
-                "$(format_cell "$paper_rn18")"  "$(format_cell "$base_rn18")"  "$(format_cell "$uocce_rn18")"  "$(format_cell "$socce_rn18")"  "$(format_cell "$mocce_rn18")" \
-                "$(format_cell "$paper_rn101")" "$(format_cell "$base_rn101")" "$(format_cell "$uocce_rn101")" "$(format_cell "$socce_rn101")" "$(format_cell "$mocce_rn101")"
+                "$(format_cell "$paper_conv")"  "$(format_cell_colored "$base_conv" "$paper_conv")"  "$(format_cell_colored "$uocce_conv" "$paper_conv")"  "$(format_cell_colored "$socce_conv" "$paper_conv")"  "$(format_cell_colored "$mocce_conv" "$paper_conv")" \
+                "$(format_cell "$paper_rn18")"  "$(format_cell_colored "$base_rn18" "$paper_rn18")"  "$(format_cell_colored "$uocce_rn18" "$paper_rn18")"  "$(format_cell_colored "$socce_rn18" "$paper_rn18")"  "$(format_cell_colored "$mocce_rn18" "$paper_rn18")" \
+                "$(format_cell "$paper_rn101")" "$(format_cell_colored "$base_rn101" "$paper_rn101")" "$(format_cell_colored "$uocce_rn101" "$paper_rn101")" "$(format_cell_colored "$socce_rn101" "$paper_rn101")" "$(format_cell_colored "$mocce_rn101" "$paper_rn101")"
         done
 
         if [[ $d_idx -lt $(( ${#DATASETS[@]} - 1 )) ]]; then

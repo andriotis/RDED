@@ -167,10 +167,26 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=PRETRAIN_ROOT)
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "cuda", "cpu"],
+                        help="Device for training. 'auto' = cuda if available else cpu. "
+                             "Use 'cuda' to fail immediately if GPU is not available.")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("--device cuda requested but CUDA is not available. "
+                               "Check: python -c \"import torch; print(torch.cuda.is_available())\"")
+        device = torch.device("cuda")
+    elif args.device == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
     datasets_to_run = list(DATASET_CONFIG.keys()) if args.dataset == "all" else [args.dataset]
 

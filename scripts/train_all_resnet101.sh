@@ -16,7 +16,7 @@ echo ""
 
 for ds in cifar10 cifar100 tinyimagenet imagenet-nette imagenet-woof imagenet-100; do
     if [[ -d "./data/$ds/train" ]]; then
-        python scripts/train_resnet101_observer.py --dataset "$ds"
+        python scripts/train_resnet101_observer.py --dataset "$ds" --device cuda
     else
         echo "SKIP $ds: ./data/$ds/train not found (run prepare_datasets.py first)"
     fi

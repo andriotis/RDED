@@ -123,10 +123,10 @@ parser.add_argument(
 )
 parser.add_argument(
     "--workers",
-    default=4,
+    default=2,
     type=int,
     metavar="N",
-    help="number of data loading workers (default: 4)",
+    help="number of data loading workers (default: 2)",
 )
 parser.add_argument(
     "--classes",

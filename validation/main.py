@@ -58,36 +58,38 @@ def occe_loss_fn(student_logits, soft_labels, hard_labels):
     probability uniformly across the remaining C-1 classes (1/(C-1) each),
     matching the formula: L_OCCE = -sum_{k != c} 1/(C-1) * log(p_k).
     """
-    student_log_probs = F.log_softmax(student_logits, dim=1)
-    kd_loss = F.kl_div(student_log_probs, soft_labels, reduction="batchmean")
+    # 1. Use standard logits for KL Divergence (KD)
+    kd_log_probs = F.log_softmax(student_logits, dim=1)
+    kd_loss = F.kl_div(kd_log_probs, soft_labels, reduction="batchmean")
+
+    # 2. Use NEGATED logits for OCCE
+    occe_log_probs = F.log_softmax(-student_logits, dim=1)
 
     num_classes = student_logits.shape[1]
     one_hot = F.one_hot(hard_labels, num_classes=num_classes).float()
     one_cold_target = (1.0 - one_hot) / (num_classes - 1)
 
-    occe_loss = -(one_cold_target * student_log_probs).sum(dim=1).mean()
+    # 3. Apply the one-cold target to the negated log probs
+    occe_loss = -(one_cold_target * occe_log_probs).sum(dim=1).mean()
 
     return kd_loss, occe_loss
 
 
 def soft_occe_loss_fn(student_logits, soft_labels, hard_labels):
-    """
-    KD and S-OCCE loss terms (unweighted).
+    # 1. Use standard logits for KL Divergence (KD)
+    kd_log_probs = F.log_softmax(student_logits, dim=1)
+    kd_loss = F.kl_div(kd_log_probs, soft_labels, reduction="batchmean")
 
-    The one-cold target is proportional to the teacher's soft probabilities over
-    non-true classes: t_k = soft_labels_k / sum_{j!=c} soft_labels_j for k!=c,
-    t_c = 0. This concentrates the OCCE penalty on classes the teacher finds
-    confusable, using the teacher's dark knowledge directly.
-    """
-    student_log_probs = F.log_softmax(student_logits, dim=1)
-    kd_loss = F.kl_div(student_log_probs, soft_labels, reduction="batchmean")
+    # 2. Use NEGATED logits for OCCE
+    occe_log_probs = F.log_softmax(-student_logits, dim=1)
 
     num_classes = student_logits.shape[1]
     one_hot = F.one_hot(hard_labels, num_classes=num_classes).bool()
     teacher_probs = soft_labels.masked_fill(one_hot, 0.0)
     soft_one_cold_target = teacher_probs / (teacher_probs.sum(dim=1, keepdim=True) + _GAMMA_EPS)
 
-    occe_loss = -(soft_one_cold_target * student_log_probs).sum(dim=1).mean()
+    # 3. Apply the soft one-cold target to the negated log probs
+    occe_loss = -(soft_one_cold_target * occe_log_probs).sum(dim=1).mean()
 
     return kd_loss, occe_loss
 
@@ -109,18 +111,12 @@ def compute_margin_temperature(epoch, total_epochs, T_start, T_final, schedule):
 
 def margin_occe_loss_fn(student_logits, soft_labels, hard_labels,
                         teacher_logits, temperature):
-    """
-    KD and M-OCCE loss terms.
+    # 1. Use standard logits for KL Divergence (KD)
+    kd_log_probs = F.log_softmax(student_logits, dim=1)
+    kd_loss = F.kl_div(kd_log_probs, soft_labels, reduction="batchmean")
 
-    The one-cold target is built from teacher logit margins:
-      s_k = exp((z_k - z_c) / T) for k != c, s_c = 0
-      t_k = s_k / sum_{j!=c} s_j
-
-    Preserves relative class similarity from the teacher's logit geometry,
-    avoiding softmax saturation that collapses small-logit classes to ~0.
-    """
-    student_log_probs = F.log_softmax(student_logits, dim=1)
-    kd_loss = F.kl_div(student_log_probs, soft_labels, reduction="batchmean")
+    # 2. Use NEGATED logits for OCCE
+    occe_log_probs = F.log_softmax(-student_logits, dim=1)
 
     num_classes = student_logits.shape[1]
     true_logits = teacher_logits[
@@ -134,7 +130,8 @@ def margin_occe_loss_fn(student_logits, soft_labels, hard_labels,
         margin_scores.sum(dim=1, keepdim=True) + _GAMMA_EPS
     )
 
-    occe_loss = -(margin_one_cold_target * student_log_probs).sum(dim=1).mean()
+    # 3. Apply the margin one-cold target to the negated log probs
+    occe_loss = -(margin_one_cold_target * occe_log_probs).sum(dim=1).mean()
 
     return kd_loss, occe_loss
 
