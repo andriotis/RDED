@@ -55,8 +55,8 @@ DEFAULT_BATCH_SIZES = {
 }
 
 DEFAULT_LRS = {
-    "cifar10": 0.1,
-    "cifar100": 0.1,
+    "cifar10": 0.2,
+    "cifar100": 0.2,
     "tinyimagenet": 0.1,
     "imagenet-nette": 0.1,
     "imagenet-woof": 0.1,
