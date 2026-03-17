@@ -81,7 +81,9 @@ parser.add_argument(
     "--occe-gamma",
     type=float,
     default=0.1,
-    help="weight for the OCCE regularisation term: L = KL + gamma * L_OCCE (default: 0.1)",
+    help="OCCE importance ratio (γ). For uniform mode: L = KL + γ*(KL/OCCE)*OCCE "
+         "(adaptive normalization). For soft/margin modes: L = KL + γ*OCCE "
+         "(fixed weight). Default: 0.1",
 )
 parser.add_argument(
     "--occe-mode",
@@ -123,10 +125,10 @@ parser.add_argument(
 )
 parser.add_argument(
     "--workers",
-    default=2,
+    default=4,
     type=int,
     metavar="N",
-    help="number of data loading workers (default: 2)",
+    help="number of data loading workers (default: 4)",
 )
 parser.add_argument(
     "--classes",

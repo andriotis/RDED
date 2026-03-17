@@ -46,7 +46,8 @@ TRAINING PARAMETERS:
   --mipc N              Maximum IPC for crop generation (default: 300)
 
 OCCE-SPECIFIC PARAMETERS:
-  --occe-gamma FLOAT    Weight of the OCCE loss term (default: 0.1)
+  --occe-gamma FLOAT    Importance ratio (γ) for U-OCCE (adaptive: γ*KL/OCCE),
+                        or fixed weight for S-OCCE/M-OCCE (default: 0.1)
   --occe-temp-schedule  Temperature schedule for M-OCCE (default: fixed)
                         Choices: fixed, linear, cosine
   --occe-temp-start F   Starting temperature for M-OCCE schedule

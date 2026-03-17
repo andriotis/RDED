@@ -283,6 +283,7 @@ def train(epoch, train_loader, teacher_model, student_model, args):
     objs_kd = AverageMeter()
     objs_occe = AverageMeter()
     objs_temp = AverageMeter()
+    objs_gamma_eff = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
@@ -334,7 +335,16 @@ def train(epoch, train_loader, teacher_model, student_model, args):
                 kd_loss_val, occe_loss_val = occe_loss_fn(
                     pred_mix_label / args.temperature, soft_mix_label, labels
                 )
-            total_loss = kd_loss_val + gamma * occe_loss_val
+
+            # Compute total loss
+            if occe_mode == "uniform":
+                # Adaptive normalization: γ_eff = r · (L_KL / L_OCCE)
+                with torch.no_grad():
+                    adaptive_gamma = gamma * (kd_loss_val / (occe_loss_val + 1e-8))
+                total_loss = kd_loss_val + adaptive_gamma * occe_loss_val
+            else:
+                # Soft / Margin: fixed weighting
+                total_loss = kd_loss_val + gamma * occe_loss_val
         else:
             soft_pred_mix_label = F.log_softmax(
                 pred_mix_label / args.temperature, dim=1
@@ -354,21 +364,25 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         objs_kd.update(kd_loss_val.item(), n)
         if occe_loss_val is not None:
             objs_occe.update(occe_loss_val.item(), n)
+            if occe_mode == "uniform":
+                objs_gamma_eff.update(adaptive_gamma.item(), n)
             if occe_mode == "margin":
                 objs_temp.update(margin_temp, n)
         top1.update(prec1.item(), n)
         top5.update(prec5.item(), n)
 
     if use_occe:
-        temp_field = (
-            "margin_T = {:.4f},\t".format(objs_temp.avg)
-            if getattr(args, "occe_mode", "uniform") == "margin" else ""
-        )
+        occe_mode = getattr(args, "occe_mode", "uniform")
+        extra_field = ""
+        if occe_mode == "uniform":
+            extra_field = "\u03b3_eff = {:.6f},\t".format(objs_gamma_eff.avg)
+        elif occe_mode == "margin":
+            extra_field = "margin_T = {:.4f},\t".format(objs_temp.avg)
         printInfo = (
             "TRAIN Iter {}: loss = {:.6f},\t".format(epoch, objs.avg)
             + "KL = {:.6f},\t".format(objs_kd.avg)
             + "OCCE = {:.6f},\t".format(objs_occe.avg)
-            + temp_field
+            + extra_field
             + "Top-1 err = {:.6f},\t".format(100 - top1.avg)
             + "Top-5 err = {:.6f},\t".format(100 - top5.avg)
             + "train_time = {:.6f}".format((time.time() - t1))
