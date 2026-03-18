@@ -728,7 +728,7 @@ print_results_table() {
     echo "┌───────────────┬─────┬${SPAN_5}┬${SPAN_5}┬${SPAN_5}┐"
     echo "│               │     │                            ConvNet                             │                           ResNet-18                            │                          ResNet-101                            │"
     echo "│   Dataset     │ IPC ├${SEP_5}┼${SEP_5}┼${SEP_5}┤"
-    echo "│               │     │   Paper    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │   Paper    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │   Paper    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │"
+    echo "│               │     │    RDED    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │    RDED    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │    RDED    │ Replicated │   U-OCCE   │   S-OCCE   │   M-OCCE   │"
     echo "├───────────────┼─────┼${SEP_ALL}┼${SEP_ALL}┼${SEP_ALL}┤"
 
     for d_idx in "${!DATASETS[@]}"; do

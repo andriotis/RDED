@@ -191,19 +191,19 @@ def load_model(model_name="resnet18", dataset="cifar10", pretrained=True, classe
                 im_size=(size, size),
             )
         elif model_name == "resnet18_modified":
-            model = thmodels.__dict__["resnet18"](pretrained=False)
+            model = thmodels.__dict__["resnet18"](weights=None)
             model.conv1 = nn.Conv2d(
                 3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False
             )
             model.maxpool = nn.Identity()
         elif model_name == "resnet101_modified":
-            model = thmodels.__dict__["resnet101"](pretrained=False)
+            model = thmodels.__dict__["resnet101"](weights=None)
             model.conv1 = nn.Conv2d(
                 3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False
             )
             model.maxpool = nn.Identity()
         else:
-            model = thmodels.__dict__[model_name](pretrained=False)
+            model = thmodels.__dict__[model_name](weights=None)
 
         return model
 
@@ -250,6 +250,6 @@ def load_model(model_name="resnet18", dataset="cifar10", pretrained=True, classe
 
                 WeightsEnum.get_state_dict = get_state_dict
 
-            model = thmodels.__dict__[model_name](pretrained=True)
+            model = thmodels.__dict__[model_name](weights=WeightsEnum.DEFAULT)
 
     return model
