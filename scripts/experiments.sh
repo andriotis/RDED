@@ -2,6 +2,16 @@
 # =============================================================================
 # Unified experiment runner for RDED Table 2 reproductions and OCCE variants.
 #
+# Paper: RDED — "On the Diversity and Realism of Distilled Dataset" (arXiv:2312.03526).
+# Related baseline / scale: SRe2L (arXiv:2306.13092). Student re-training uses KL
+# distillation on teacher soft labels (plus optional OCCE); reported accuracy uses
+# standard cross-entropy on the real validation set (not KL) — see validation/main.py
+# and the discussion in https://github.com/VILA-Lab/SRe2L/issues/23
+#
+# ImageNette / ImageWoof: run prepare_datasets.py so ./data/.../wnid_order.txt matches
+# the released observers (lexicographic WordNet order); see
+# https://github.com/LINs-lab/RDED/issues/10
+#
 # Runs baseline (KD-only) and/or OCCE-augmented student training across
 # 7 datasets, 3 architecture families (ConvNet, ResNet-18, ResNet-101),
 # and 3 IPC values (1, 10, 50).

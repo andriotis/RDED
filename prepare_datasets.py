@@ -1,6 +1,9 @@
 """
 Prepare all datasets for RDED Table 2 reproduction.
 
+Aligns with RDED (arXiv:2312.03526) / CVPR 2024 and the same ImageNet subsets
+used in large-scale condensation work such as SRe2L (arXiv:2306.13092).
+
 Downloads and converts each dataset into the required folder format:
     ./data/{subset}/train/00000/, ./data/{subset}/train/00001/, ...
     ./data/{subset}/val/00000/,   ./data/{subset}/val/00001/,   ...
@@ -29,22 +32,17 @@ import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
-import pickle
 
 DATA_ROOT = Path("./data")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ImageNette / ImageWoof class definitions (sorted ImageNet-1K WordNet IDs)
-# ─────────────────────────────────────────────────────────────────────────────
 IMAGENETTE_WNIDS = [
     "n01440764", "n02102040", "n02979186", "n03000684", "n03028079",
     "n03394916", "n03417042", "n03425413", "n03445777", "n03888257",
 ]
 
-# RDED pretrained models expect this exact class order (see prepare docs)
 IMAGEWOOF_WNIDS = [
-    "n02096294", "n02093754", "n02111889", "n02088364", "n02086240",
-    "n02089973", "n02087394", "n02115641", "n02099601", "n02105641",
+    "n02096294", "n02093754", "n02111889","n02088364", "n02086240",  "n02089973",
+    "n02087394", "n02115641", "n02099601", "n02105641",
 ]
 
 # ImageNet-100: 100-class subset used in dataset distillation literature.
@@ -119,21 +117,6 @@ TINYIMAGENET_WNIDS = [
 # Google Drive folder ID for pretrained observer models
 GDRIVE_FOLDER_ID = "1HmrheO6MgX453a5UPJdxPHK4UTv-4aVt"
 
-PRETRAINED_FILES = {
-    "cifar10_conv3":                  "1_PLACEHOLDER_cifar10_conv3",
-    "cifar10_resnet18_modified":      "1_PLACEHOLDER_cifar10_rn18m",
-    "cifar100_conv3":                 "1_PLACEHOLDER_cifar100_conv3",
-    "cifar100_resnet18_modified":     "1_PLACEHOLDER_cifar100_rn18m",
-    "tinyimagenet_conv4":             "1_PLACEHOLDER_tiny_conv4",
-    "tinyimagenet_resnet18_modified": "1_PLACEHOLDER_tiny_rn18m",
-    "imagenet-nette_conv5":           "1_PLACEHOLDER_nette_conv5",
-    "imagenet-nette_resnet18":        "1_PLACEHOLDER_nette_rn18",
-    "imagenet-woof_conv5":            "1_PLACEHOLDER_woof_conv5",
-    "imagenet-woof_resnet18":         "1_PLACEHOLDER_woof_rn18",
-    "imagenet-100_conv6":             "1_PLACEHOLDER_in100_conv6",
-    "imagenet-100_resnet18":          "1_PLACEHOLDER_in100_rn18",
-}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -189,57 +172,13 @@ def write_class_order_file(output_root: Path, class_names: list[str]) -> None:
             f.write(f"{idx:05d}\t{name}\n")
 
 
-def _unpickle(path: Path) -> dict:
-    with open(path, "rb") as fo:
-        return pickle.load(fo, encoding="latin1")
-
-
-def prepare_cifar100_from_python(cache: Path, out: Path) -> None:
-    """Convert CIFAR-100 from the raw python pickles into ImageFolder structure.
-
-    This mirrors community scripts that use the official 'cifar-100-python' files:
-    we decode images, place them into folders in fine-label index order (0..99),
-    and record the class name mapping in class_order.txt.
-    """
-    src_dir = cache / "cifar-100-python"
-    if not src_dir.exists():
-        raise RuntimeError(
-            f"Expected CIFAR-100 python files at {src_dir}. "
-            "If you downloaded via torchvision, they should exist in the cache root."
-        )
-
-    meta = _unpickle(src_dir / "meta")
-    fine_label_names = meta["fine_label_names"]
-    if len(fine_label_names) != 100:
-        raise RuntimeError(f"Expected 100 fine labels, got {len(fine_label_names)}")
-
-    # Create numbered class folders.
-    for split in ("train", "val"):
-        split_dir = out / split
-        split_dir.mkdir(parents=True, exist_ok=True)
-        for c in range(100):
-            (split_dir / f"{c:05d}").mkdir(exist_ok=True)
-
-    def save_split(split_key: str, split_dir: Path) -> None:
-        data_dict = _unpickle(src_dir / split_key)
-        data = data_dict["data"]  # [N, 3072]
-        labels = data_dict["fine_labels"]
-        filenames = data_dict["filenames"]
-        counters = [0] * 100
-
-        for i in tqdm(range(data.shape[0]), desc=f"  Saving CIFAR-100 {split_key}"):
-            img = data[i].reshape(3, 32, 32).transpose(1, 2, 0)  # HWC
-            pil = Image.fromarray(img.astype("uint8"))
-            label = int(labels[i])
-            # Preserve original filename where possible; fall back to a counter.
-            base = filenames[i] if isinstance(filenames[i], str) else f"img_{counters[label]:05d}.png"
-            pil.save(split_dir / f"{label:05d}" / base)
-            counters[label] += 1
-
-    save_split("train", out / "train")
-    save_split("test", out / "val")
-
-    write_class_order_file(out, fine_label_names)
+def write_wnid_order_file(output_root: Path, wnid_list: list[str]) -> None:
+    """Write folder index -> WordNet ID (same format as imagenet-1k/wnid_order.txt)."""
+    output_root.mkdir(parents=True, exist_ok=True)
+    out_path = output_root / "wnid_order.txt"
+    with open(out_path, "w") as f:
+        for idx, wnid in enumerate(wnid_list):
+            f.write(f"{idx:05d}: {wnid}\n")
 
 
 def copy_class_folder(src_dir: Path, dst_dir: Path, wnid: str, class_idx: int):
@@ -415,6 +354,7 @@ def prepare_imagenette():
     for split in ("train", "val"):
         remap_imagenet_folders(raw, out, IMAGENETTE_WNIDS, split)
 
+    write_wnid_order_file(out, IMAGENETTE_WNIDS)
     print("  Done.")
 
 
@@ -434,6 +374,7 @@ def prepare_imagewoof():
     for split in ("train", "val"):
         remap_imagenet_folders(raw, out, IMAGEWOOF_WNIDS, split)
 
+    write_wnid_order_file(out, IMAGEWOOF_WNIDS)
     print("  Done.")
 
 

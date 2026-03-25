@@ -1,3 +1,5 @@
 ## Prepare Other Datasets
 
 To ensure consistency across datasets, we standardized the folder naming convention for all datasets except TinyImageNet. Each class folder is named using a five-digit extension of its class ID. For example, if `class_id=0` corresponds to the first class in ImageNet-1K, "tench" (乌鳢), the folder containing images for this class is named `00000`. This naming convention allows for seamless integration with our pre-trained models and code implementation, ensuring that users can accurately execute our RDED.
+
+Tiny-ImageNet uses the explicit index → WordNet mapping in [`tinyimagenet.md`](tinyimagenet.md). For other subsets, the same idea applies: the order of `00000`, `00001`, … is fixed in `prepare_datasets.py` (e.g. ImageNet-1K sorted WordNet IDs, ImageNet-100 list, ImageNette / ImageWoof lexicographic WordNet order matching the fast-ai archives). Running `prepare_datasets.py` writes `data/<subset>/wnid_order.txt` where applicable so folder indices stay aligned with the released observers.
