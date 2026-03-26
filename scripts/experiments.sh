@@ -209,9 +209,9 @@ run_experiment_baseline() {
         return
     fi
 
-    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -q "Best accuracy is" "$log_file"; then
+    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -aq "Best accuracy is" "$log_file"; then
         local prev_acc
-        prev_acc=$(grep -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
+        prev_acc=$(grep -a -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
         echo "  SKIPPED (already completed, best acc = ${prev_acc}%)"
         echo ""
         return
@@ -294,9 +294,9 @@ run_experiment_uocce() {
         return
     fi
 
-    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -q "Best accuracy is" "$log_file"; then
+    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -aq "Best accuracy is" "$log_file"; then
         local prev_acc
-        prev_acc=$(grep -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
+        prev_acc=$(grep -a -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
         echo "  SKIPPED (already completed, best acc = ${prev_acc}%)"
         echo ""
         return
@@ -379,9 +379,9 @@ run_experiment_socce() {
         return
     fi
 
-    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -q "Best accuracy is" "$log_file"; then
+    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -aq "Best accuracy is" "$log_file"; then
         local prev_acc
-        prev_acc=$(grep -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
+        prev_acc=$(grep -a -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
         echo "  SKIPPED (already completed, best acc = ${prev_acc}%)"
         echo ""
         return
@@ -472,9 +472,9 @@ ${temp_args}"
         return
     fi
 
-    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -q "Best accuracy is" "$log_file"; then
+    if [[ "$FORCE" = false && -f "$log_file" ]] && grep -aq "Best accuracy is" "$log_file"; then
         local prev_acc
-        prev_acc=$(grep -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
+        prev_acc=$(grep -a -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1)
         echo "  SKIPPED (already completed, best acc = ${prev_acc}%)"
         echo ""
         return
@@ -638,7 +638,8 @@ extract_best_acc() {
         echo ""
         return
     fi
-    grep -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1
+    # -a: treat as text (logs may contain NUL/ANSI; grep would else skip as "binary")
+    grep -a -oP 'Best accuracy is \K[0-9]+\.?[0-9]*' "$log_file" | tail -1
 }
 
 # mean/std aggregation for a set of log files
