@@ -157,6 +157,11 @@ parser.add_argument(
     type=str,
     help="name of the experiment, subfolder under syn_data_path",
 )
+parser.add_argument(
+    "--skip-synth",
+    action="store_true",
+    help="skip synthesis if syn_data_path already populated (reuse across student archs)",
+)
 args = parser.parse_args()
 
 args.train_dir = f"./data/{args.subset}/train/"
