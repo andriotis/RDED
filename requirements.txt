@@ -10,6 +10,8 @@ numpy<2
 # Unpinned: stable APIs.
 Pillow
 tqdm
+pandas
+tabulate
 
 # scripts/teachers.py model download (Google Drive folder fetch).
 gdown

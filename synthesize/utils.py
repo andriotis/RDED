@@ -99,6 +99,25 @@ def cross_entropy(y_pre, y):
     return (-torch.log(y_pre.gather(1, y.view(-1, 1))))[:, 0]
 
 
+def occe_score(y_pre, y):
+    """Per-sample OCCE value. Low = uniform-complement structure = strong anticlass signal."""
+    N = y_pre.shape[1]
+    ycomp = (N - 1) * F.softmax(-y_pre, dim=1)
+    mask = torch.ones((y.size(0), N), device=y_pre.device)
+    mask.scatter_(1, y.view(-1, 1), 0.0)
+    return -1 / (N - 1) * torch.sum(mask * torch.log(ycomp + 1e-7), dim=1)
+
+
+def score(y_pre, y, selector_type):
+    if selector_type == "ce":
+        return cross_entropy(y_pre, y)
+    if selector_type == "occe":
+        return occe_score(y_pre, y)
+    if selector_type == "ce+occe":
+        return cross_entropy(y_pre, y) + occe_score(y_pre, y)
+    raise ValueError(f"unknown selector type: {selector_type}")
+
+
 def selector(n, model, images, labels, size, m=5):
     with torch.no_grad():
         # [mipc, m, 3, 224, 224]
@@ -117,7 +136,7 @@ def selector(n, model, images, labels, size, m=5):
         preds = batched_forward(model, pad(images, size).cuda(), batch_size)
 
         # [mipc * m]
-        dist = cross_entropy(preds, labels)
+        dist = score(preds, labels, sys_args.selector)
 
         # [m, mipc]
         dist = dist.reshape(m, s[0])
