@@ -1,0 +1,15 @@
+# Pinned: synthesize/utils.py relies on the legacy torchvision
+# `pretrained=True` keyword (removed in newer torchvision releases).
+torch==2.1.0
+torchvision==0.16.0
+
+# Pinned: torch 2.1.0 wheels are compiled against NumPy 1.x and will warn
+# (and risk segfaults) under NumPy 2.x.
+numpy<2
+
+# Unpinned: stable APIs.
+Pillow
+tqdm
+
+# scripts/teachers.py model download (Google Drive folder fetch).
+gdown
