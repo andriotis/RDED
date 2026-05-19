@@ -3,10 +3,11 @@
 
 Reads logs/results.jsonl, classifies each row into a loss column (KL or KL+OCKL),
 aggregates by (dataset, arch, ipc, loss), and prints:
-  1. Per-dataset best-top1 table (stdout, markdown) — rows = (arch, ipc), cols = loss settings
-  2. Per-dataset NC1 table (stdout, markdown); NC2/NC3/NC4 as appendix
-  3. KL-column reproduction sanity vs RDED Table 2 (stdout)
-  4. Diagnostics: missing/partial cells, high-variance cells, schema (stderr)
+  1. Unified best-top1 table (stdout, markdown) — rows = (dataset, arch, ipc),
+     cols = Paper (RDED Table 2 reference), KL, KL+OCKL
+  2. Unified NC1-NC4 tables (stdout, markdown) — one table per metric, rows
+     spanning all datasets
+  3. Diagnostics: missing/partial cells, high-variance cells, schema (stderr)
 
 Treats legacy Phase B.0 rows (student_loss="kd", missing w_ockl) as the KL baseline.
 Treats rows with w_ockl > 0 as KL+OCKL.
@@ -88,74 +89,49 @@ def fmt_nc(stats):
     return f"{stats['mean']:.3f}"
 
 
-def print_acc_tables(stats):
-    """One table per dataset; rows = (arch, ipc); cols = loss settings."""
-    for dataset in sorted({key[0] for key in expected_cells()}):
-        print(f"\n## Best top-1 accuracy — {dataset} (mean ± std over {EXPECTED_SEEDS} seeds)\n")
-        rows = []
-        for key in expected_cells():
-            d, arch, ipc = key
-            if d != dataset:
-                continue
-            row = {"Arch": arch, "IPC": ipc}
-            best_mean = None
-            for loss in LOSS_COLS:
-                s = stats.get((d, arch, ipc, loss))
-                row[loss] = fmt_cell(s)
-                if s is not None and s["count"] > 0:
-                    if best_mean is None or s["mean"] > best_mean:
-                        best_mean = s["mean"]
-            # Bold the best per row.
-            if best_mean is not None:
-                for loss in LOSS_COLS:
-                    s = stats.get((d, arch, ipc, loss))
-                    if s is not None and s["count"] > 0 and s["mean"] == best_mean:
-                        row[loss] = f"**{row[loss]}**"
-            rows.append(row)
-        print(pd.DataFrame(rows).to_markdown(index=False))
-
-
-def print_nc_tables(nc_stats):
-    """One block per dataset; NC1 prominent, NC2/NC3/NC4 as appendix."""
-    for dataset in sorted({key[0] for key in expected_cells()}):
-        for metric in ("nc1", "nc2", "nc3", "nc4"):
-            label = "NC1 (within-class variance collapse)" if metric == "nc1" else metric.upper()
-            print(f"\n## {label} — {dataset} (mean over {EXPECTED_SEEDS} seeds)\n")
-            rows = []
-            for key in expected_cells():
-                d, arch, ipc = key
-                if d != dataset:
-                    continue
-                row = {"Arch": arch, "IPC": ipc}
-                for loss in LOSS_COLS:
-                    row[loss] = fmt_nc(nc_stats[metric].get((d, arch, ipc, loss)))
-                rows.append(row)
-            print(pd.DataFrame(rows).to_markdown(index=False))
-
-
-def print_kl_reproduction(stats):
-    """Compare our KL column against RDED paper Table 2 values."""
-    print("\n## KL column vs RDED Table 2 (reproduction sanity)\n")
+def print_acc_table(stats):
+    """Single table across all datasets; rows = (dataset, arch, ipc); cols = Paper, loss settings."""
+    print(f"\n## Best top-1 accuracy (mean ± std over {EXPECTED_SEEDS} seeds)\n")
     rows = []
     for key in expected_cells():
         d, arch, ipc = key
         paper_mean, paper_std = RDED_TABLE2[key]
-        s = stats.get((d, arch, ipc, "KL"))
-        if s is None or s["count"] == 0:
-            ours_str = "--"
-            delta = "--"
-        else:
-            ours_str = fmt_cell(s)
-            delta = f"{s['mean'] - paper_mean:+.2f}"
-        rows.append({
+        row = {
             "Dataset": d,
             "Arch": arch,
             "IPC": ipc,
             "Paper": f"{paper_mean:.1f} ± {paper_std:.1f}",
-            "Ours (KL)": ours_str,
-            "Δ": delta,
-        })
+        }
+        best_mean = None
+        for loss in LOSS_COLS:
+            s = stats.get((d, arch, ipc, loss))
+            row[loss] = fmt_cell(s)
+            if s is not None and s["count"] > 0:
+                if best_mean is None or s["mean"] > best_mean:
+                    best_mean = s["mean"]
+        # Bold the best of {KL, KL+OCKL} per row; Paper is reference, not a competitor.
+        if best_mean is not None:
+            for loss in LOSS_COLS:
+                s = stats.get((d, arch, ipc, loss))
+                if s is not None and s["count"] > 0 and s["mean"] == best_mean:
+                    row[loss] = f"**{row[loss]}**"
+        rows.append(row)
     print(pd.DataFrame(rows).to_markdown(index=False))
+
+
+def print_nc_tables(nc_stats):
+    """One table per NC metric, rows spanning all datasets."""
+    for metric in ("nc1", "nc2", "nc3", "nc4"):
+        label = "NC1 (within-class variance collapse)" if metric == "nc1" else metric.upper()
+        print(f"\n## {label} — (mean over {EXPECTED_SEEDS} seeds)\n")
+        rows = []
+        for key in expected_cells():
+            d, arch, ipc = key
+            row = {"Dataset": d, "Arch": arch, "IPC": ipc}
+            for loss in LOSS_COLS:
+                row[loss] = fmt_nc(nc_stats[metric].get((d, arch, ipc, loss)))
+            rows.append(row)
+        print(pd.DataFrame(rows).to_markdown(index=False))
 
 
 def print_diagnostics(raw_df, matrix_df, stats, var_threshold):
@@ -236,8 +212,7 @@ def main():
     top1_stats = aggregate(matrix_df, "best_top1")
     nc_stats = {m: aggregate(matrix_df, m) for m in ("nc1", "nc2", "nc3", "nc4")}
 
-    print_acc_tables(top1_stats)
-    print_kl_reproduction(top1_stats)
+    print_acc_table(top1_stats)
     print_nc_tables(nc_stats)
     print_diagnostics(raw_df, matrix_df, top1_stats, args.variance_threshold)
 

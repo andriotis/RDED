@@ -9,6 +9,9 @@
 #   --datasets cifar100 tinyimagenet            datasets to sweep
 #   --archs conv3 conv4 resnet18_modified       archs to sweep
 #   --losses kl kl+ockl                         loss settings to sweep (default both)
+#   --resume                                    skip cells already complete in logs/results.jsonl
+#                                                 (default: rotate logs/results.jsonl to
+#                                                  logs/results-YYYYMMDD[-N].jsonl for a fresh slate)
 #   --dry-run                                   list cells without executing
 #   -h, --help                                  show this help
 #
@@ -28,9 +31,10 @@ DATASETS=(cifar100 tinyimagenet)
 ARCHS=(conv3 conv4 resnet18_modified)
 LOSSES=(kl kl+ockl)
 DRY_RUN=0
+RESUME=0
 
 usage() {
-  sed -n '2,18p' "$0"
+  sed -n '2,21p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -52,6 +56,8 @@ while [[ $# -gt 0 ]]; do
       while [[ $# -gt 0 && "$1" != --* ]]; do LOSSES+=("$1"); shift; done ;;
     --dry-run)
       DRY_RUN=1; shift ;;
+    --resume)
+      RESUME=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -80,6 +86,56 @@ done
 
 mkdir -p logs/loss_matrix
 
+# Rotate-on-default / resume-on-flag for logs/results.jsonl.
+# Default (no --resume): move any existing results.jsonl aside so this run
+#   starts from a clean slate (the rotated file becomes results-YYYYMMDD.jsonl,
+#   or results-YYYYMMDD-N.jsonl if that already exists).
+# With --resume: preload the (dataset, arch, stud, ipc, seed, student_loss)
+#   keys of completed rows and skip those cells during the loop. Rows with
+#   best_top1 == null (incomplete/failed runs) are not treated as complete.
+EXISTING_KEYS=""
+if [[ $RESUME -eq 1 ]]; then
+  if [[ ! -f logs/results.jsonl ]]; then
+    echo "--resume given but logs/results.jsonl missing; running fresh." >&2
+  else
+    EXISTING_KEYS=$(mktemp)
+    trap 'rm -f "$EXISTING_KEYS"' EXIT
+    python - > "$EXISTING_KEYS" <<'PY'
+import json
+with open("logs/results.jsonl") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get("best_top1") is None:
+            continue
+        print(f"{r.get('dataset')}|{r.get('arch')}|{r.get('stud')}|{r.get('ipc')}|{r.get('seed')}|{r.get('student_loss')}")
+PY
+    n_keys=$(wc -l < "$EXISTING_KEYS")
+    echo "Resume mode: $n_keys completed cells in results.jsonl will be skipped"
+  fi
+else
+  if [[ -f logs/results.jsonl ]]; then
+    stamp=$(date +%Y%m%d)
+    archive="logs/results-${stamp}.jsonl"
+    n=1
+    while [[ -e "$archive" ]]; do
+      archive="logs/results-${stamp}-${n}.jsonl"
+      ((n++))
+    done
+    if [[ $DRY_RUN -eq 1 ]]; then
+      echo "[dry-run] would rotate logs/results.jsonl -> $archive"
+    else
+      mv logs/results.jsonl "$archive"
+      echo "Rotated logs/results.jsonl -> $archive"
+    fi
+  fi
+fi
+
 echo "Matrix: datasets=(${DATASETS[*]}) archs=(${ARCHS[*]}) ipcs=(${IPCS[*]}) seeds=(${SEEDS[*]}) losses=(${LOSSES[*]})"
 
 for dataset in "${DATASETS[@]}"; do
@@ -90,6 +146,13 @@ for dataset in "${DATASETS[@]}"; do
     for ipc in "${IPCS[@]}"; do
       for seed in "${SEEDS[@]}"; do
         for loss in "${LOSSES[@]}"; do
+          if [[ -n "$EXISTING_KEYS" ]]; then
+            key="${dataset}|${arch}|${arch}|${ipc}|${seed}|${loss}"
+            if grep -Fxq "$key" "$EXISTING_KEYS"; then
+              echo "[skip] dataset=$dataset arch=$arch ipc=$ipc seed=$seed loss=$loss (already in results.jsonl)"
+              continue
+            fi
+          fi
           loss_tag="${loss//+/_}"
           log="logs/loss_matrix/${dataset}_${arch}_ipc${ipc}_seed${seed}_${loss_tag}.log"
           py_args=(
