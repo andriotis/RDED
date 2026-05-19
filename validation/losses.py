@@ -3,27 +3,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class OCCELoss(nn.Module):
-    """One-Cold Cross-Entropy loss (Anticlasses paper).
+class OCKLLoss(nn.Module):
+    """One-Cold KL-divergence loss (OCKL).
 
-    Pushes the softmax over `-logits` toward uniform on the (N-1) non-target
-    classes, inducing neural collapse. Kept verbatim from
-    Anticlasses/losses.py:6-18 so both repos agree on the math.
+    Both teacher and student logits are computed on the same cutmix-mixed images.
+    Forward KL between the student's negated-softmax distribution and an
+    inverted-teacher target:
+      Q_student  = softmax(-z_student / T)
+      P_inv[k]   = (1 - p_teacher[k]) / (N - 1)   # equals (1 - p) / sum(1 - p)
+      OCKL       = KL(P_inv || Q_student),  reduction='batchmean'
     """
 
-    def forward(self, inputs, targets):
-        N = inputs.shape[1]
-        ycomp = (N - 1) * F.softmax(-inputs, dim=1)
-        y = torch.ones((targets.size(0), N), device=inputs.device)
-        y.scatter_(1, targets.unsqueeze(1), 0.0)
-        loss = -1 / (N - 1) * torch.sum(y * torch.log(ycomp + 1e-7), dim=1)
-        return torch.mean(loss)
-
-
-def occe_per_sample(inputs, targets):
-    """OCCE value per sample (no mean reduction). Used as a synthesis-time score."""
-    N = inputs.shape[1]
-    ycomp = (N - 1) * F.softmax(-inputs, dim=1)
-    y = torch.ones((targets.size(0), N), device=inputs.device)
-    y.scatter_(1, targets.unsqueeze(1), 0.0)
-    return -1 / (N - 1) * torch.sum(y * torch.log(ycomp + 1e-7), dim=1)
+    def forward(self, student_logits_mixed, teacher_logits_mixed, temperature):
+        N = student_logits_mixed.shape[1]
+        p_teacher = F.softmax(teacher_logits_mixed / temperature, dim=1)
+        p_inv = (1.0 - p_teacher) / (N - 1)
+        log_q = F.log_softmax(-student_logits_mixed / temperature, dim=1)
+        return F.kl_div(log_q, p_inv, reduction="batchmean")

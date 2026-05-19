@@ -31,7 +31,7 @@ from validation.utils import (
     accuracy,
     get_parameters,
 )
-from validation.losses import OCCELoss
+from validation.losses import OCKLLoss
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
 
@@ -222,11 +222,7 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
     optimizer = args.optimizer
     loss_function_kl = nn.KLDivLoss(reduction="batchmean")
-    ce_criterion = nn.CrossEntropyLoss() if args.w_ce > 0 else None
-    occe_criterion = OCCELoss() if args.w_occe > 0 else None
-    # CE/OCCE need a real target class; we apply them to the un-mixed student
-    # pred against the original labels (avoids cutmix-label ambiguity).
-    need_pred_label_grad = (args.w_ce > 0) or (args.w_occe > 0)
+    ockl_criterion = OCKLLoss() if args.w_ockl > 0 else None
 
     teacher_model.eval()
     student_model.train()
@@ -238,25 +234,9 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
             mix_images, _, _, _ = mix_aug(images, args)
 
-            if not need_pred_label_grad:
-                pred_label = student_model(images)
-
-            teacher_logits = teacher_model(mix_images)
-            if args.soft_label == "teacher":
-                soft_mix_label = F.softmax(teacher_logits / args.temperature, dim=1)
-            elif args.soft_label == "one-cold":
-                N = teacher_logits.shape[1]
-                soft_mix_label = torch.full_like(teacher_logits, 1.0 / (N - 1))
-                soft_mix_label.scatter_(1, labels.unsqueeze(1), 0.0)
-            elif args.soft_label == "blend":
-                teacher_soft = F.softmax(teacher_logits / args.temperature, dim=1)
-                N = teacher_logits.shape[1]
-                one_cold = torch.full_like(teacher_logits, 1.0 / (N - 1))
-                one_cold.scatter_(1, labels.unsqueeze(1), 0.0)
-                soft_mix_label = args.blend_alpha * teacher_soft + (1 - args.blend_alpha) * one_cold
-
-        if need_pred_label_grad:
             pred_label = student_model(images)
+            teacher_logits = teacher_model(mix_images)
+            soft_mix_label = F.softmax(teacher_logits / args.temperature, dim=1)
 
         if batch_idx % args.re_accum_steps == 0:
             optimizer.zero_grad()
@@ -265,18 +245,16 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
         pred_mix_label = student_model(mix_images)
 
-        loss = None
-        if args.w_kd > 0:
-            soft_pred_mix_label = F.log_softmax(pred_mix_label / args.temperature, dim=1)
-            kd_loss = loss_function_kl(soft_pred_mix_label, soft_mix_label)
-            # Preserve bit-identical behavior when w_kd == 1.0 and no other terms.
-            loss = kd_loss if args.w_kd == 1.0 else args.w_kd * kd_loss
-        if args.w_ce > 0:
-            ce_loss = args.w_ce * ce_criterion(pred_label, labels)
-            loss = ce_loss if loss is None else loss + ce_loss
-        if args.w_occe > 0:
-            occe_loss = args.w_occe * occe_criterion(pred_label, labels)
-            loss = occe_loss if loss is None else loss + occe_loss
+        soft_pred_mix_label = F.log_softmax(pred_mix_label / args.temperature, dim=1)
+        kd_loss = loss_function_kl(soft_pred_mix_label, soft_mix_label)
+        # Preserve bit-identical behavior when w_kl == 1.0 and no other terms.
+        loss = kd_loss if args.w_kl == 1.0 else args.w_kl * kd_loss
+
+        if args.w_ockl > 0:
+            ockl_loss = args.w_ockl * ockl_criterion(
+                pred_mix_label, teacher_logits, args.temperature
+            )
+            loss = loss + ockl_loss
 
         loss = loss / args.re_accum_steps
 

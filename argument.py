@@ -158,51 +158,25 @@ parser.add_argument(
     help="name of the experiment, subfolder under syn_data_path",
 )
 
-# OCCE / Anticlasses additions (paper bridge experiments)
+# OCKL / Anticlasses additions (paper bridge experiments)
 parser.add_argument(
     "--student-loss",
     type=str,
-    default="kd",
-    choices=["kd", "ce", "ce+occe", "kd+occe"],
-    help="preset for student training loss; sets default w_kd/w_ce/w_occe weights",
+    default="kl",
+    choices=["kl", "kl+ockl"],
+    help="preset for student training loss; sets default w_kl/w_ockl weights",
 )
 parser.add_argument(
-    "--w-kd",
+    "--w-kl",
     type=float,
     default=None,
-    help="weight on KD term (overrides --student-loss preset if set)",
+    help="weight on KL (knowledge-distillation) term (overrides --student-loss preset if set)",
 )
 parser.add_argument(
-    "--w-ce",
+    "--w-ockl",
     type=float,
     default=None,
-    help="weight on CE term (overrides --student-loss preset if set)",
-)
-parser.add_argument(
-    "--w-occe",
-    type=float,
-    default=None,
-    help="weight on OCCE term (overrides --student-loss preset if set)",
-)
-parser.add_argument(
-    "--selector",
-    type=str,
-    default="ce",
-    choices=["ce", "occe", "ce+occe"],
-    help="synthesis-time selector scoring function",
-)
-parser.add_argument(
-    "--soft-label",
-    type=str,
-    default="teacher",
-    choices=["teacher", "one-cold", "blend"],
-    help="KD target construction: teacher softmax, one-cold, or alpha-blend of the two",
-)
-parser.add_argument(
-    "--blend-alpha",
-    type=float,
-    default=0.5,
-    help="alpha in soft_label = alpha*teacher + (1-alpha)*one_cold (only used when --soft-label=blend)",
+    help="weight on OCKL term (overrides --student-loss preset if set)",
 )
 parser.add_argument(
     "--skip-synth",
@@ -369,14 +343,10 @@ if (
 
 # resolve loss-weight preset; explicit --w-* args (non-None) override the preset
 _preset_weights = {
-    "kd":      {"w_kd": 1.0, "w_ce": 0.0, "w_occe": 0.0},
-    "ce":      {"w_kd": 0.0, "w_ce": 1.0, "w_occe": 0.0},
-    "ce+occe": {"w_kd": 0.0, "w_ce": 1.0, "w_occe": 1.0},
-    "kd+occe": {"w_kd": 1.0, "w_ce": 0.0, "w_occe": 1.0},
+    "kl":      {"w_kl": 1.0, "w_ockl": 0.0},
+    "kl+ockl": {"w_kl": 1.0, "w_ockl": 1.0},
 }[args.student_loss]
-if args.w_kd is None:
-    args.w_kd = _preset_weights["w_kd"]
-if args.w_ce is None:
-    args.w_ce = _preset_weights["w_ce"]
-if args.w_occe is None:
-    args.w_occe = _preset_weights["w_occe"]
+if args.w_kl is None:
+    args.w_kl = _preset_weights["w_kl"]
+if args.w_ockl is None:
+    args.w_ockl = _preset_weights["w_ockl"]

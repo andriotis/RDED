@@ -44,11 +44,9 @@ def load_rows(path):
 def filter_baseline(df):
     if df.empty:
         return df
-    mask = (
-        (df["student_loss"] == "kd")
-        & (df["selector"] == "ce")
-        & (df["soft_label"] == "teacher")
-    )
+    student_loss = df["student_loss"] if "student_loss" in df.columns else pd.Series([], dtype=object)
+    w_ockl = df["w_ockl"].fillna(0) if "w_ockl" in df.columns else pd.Series(0, index=df.index)
+    mask = student_loss.isin(["kd", "kl"]) & (w_ockl == 0)
     return df[mask].copy()
 
 
@@ -207,7 +205,7 @@ def print_diagnostics(raw_df, baseline_df, top1_stats, var_threshold):
     n_non_baseline = int(len(raw_df) - len(filter_baseline(raw_df)))
     if n_non_baseline:
         print(f"\n  {n_non_baseline} non-baseline row(s) ignored "
-              "(student_loss != kd or selector != ce or soft_label != teacher).",
+              "(student_loss not in {kd, kl} or w_ockl > 0).",
               file=sys.stderr)
 
     if issues:
