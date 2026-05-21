@@ -13,7 +13,6 @@ tqdm
 pandas
 tabulate
 PyYAML
-matplotlib
 
 # scripts/teachers.py model download (Google Drive folder fetch).
 gdown
