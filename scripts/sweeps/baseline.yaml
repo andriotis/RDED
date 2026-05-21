@@ -1,0 +1,33 @@
+# Baseline matrix: stock RDED across both datasets, all compatible
+# (arch, ipc, seed) combinations.
+#
+# Run: python scripts/run_sweep.py scripts/sweeps/baseline.yaml [--resume] [--dry-run]
+#
+# Cells: 2 archs/dataset x 2 datasets x 3 ipcs x 3 seeds = 36 total.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1, 10, 50]
+  weights:
+    kl: 1.0
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
+
+  - name: cifar100_resnet18
+    dataset: cifar100
+    arch: resnet18_modified
+
+  - name: tinyimagenet_conv4
+    dataset: tinyimagenet
+    arch: conv4
+
+  - name: tinyimagenet_resnet18
+    dataset: tinyimagenet
+    arch: resnet18_modified

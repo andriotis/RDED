@@ -2,6 +2,8 @@ import argparse
 import os
 import math
 
+from validation.losses import LOSS_REGISTRY
+
 parser = argparse.ArgumentParser("RDED")
 """Synthesis"""
 parser.add_argument(
@@ -158,26 +160,16 @@ parser.add_argument(
     help="name of the experiment, subfolder under syn_data_path",
 )
 
-# OCKL / Anticlasses additions (paper bridge experiments)
-parser.add_argument(
-    "--student-loss",
-    type=str,
-    default="kl",
-    choices=["kl", "kl+ockl"],
-    help="preset for student training loss; sets default w_kl/w_ockl weights",
-)
-parser.add_argument(
-    "--w-kl",
-    type=float,
-    default=None,
-    help="weight on KL (knowledge-distillation) term (overrides --student-loss preset if set)",
-)
-parser.add_argument(
-    "--w-ockl",
-    type=float,
-    default=None,
-    help="weight on OCKL term (overrides --student-loss preset if set)",
-)
+# Student-loss weights: one --w-<name> flag per entry in LOSS_REGISTRY.
+# Adding a new loss = adding a registry entry; argparse picks it up here.
+for _name, (_, _default_w) in LOSS_REGISTRY.items():
+    parser.add_argument(
+        f"--w-{_name.replace('_', '-')}",
+        type=float,
+        default=_default_w,
+        dest=f"w_{_name}",
+        help=f"weight on the {_name.upper()} student-loss term (default {_default_w}; 0 disables)",
+    )
 parser.add_argument(
     "--skip-synth",
     action="store_true",
@@ -341,12 +333,9 @@ if (
     args.re_batch_size = 25
     args.adamw_lr = 0.002
 
-# resolve loss-weight preset; explicit --w-* args (non-None) override the preset
-_preset_weights = {
-    "kl":      {"w_kl": 1.0, "w_ockl": 0.0},
-    "kl+ockl": {"w_kl": 1.0, "w_ockl": 1.0},
-}[args.student_loss]
-if args.w_kl is None:
-    args.w_kl = _preset_weights["w_kl"]
-if args.w_ockl is None:
-    args.w_ockl = _preset_weights["w_ockl"]
+# Sanity: at least one student-loss term must be active.
+if not any(getattr(args, f"w_{n}") > 0 for n in LOSS_REGISTRY):
+    raise SystemExit(
+        "no active student-loss term: set at least one --w-<name> > 0 "
+        f"(registered losses: {', '.join(LOSS_REGISTRY)})"
+    )

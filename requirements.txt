@@ -12,6 +12,7 @@ Pillow
 tqdm
 pandas
 tabulate
+PyYAML
 
 # scripts/teachers.py model download (Google Drive folder fetch).
 gdown

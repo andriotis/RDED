@@ -31,7 +31,7 @@ from validation.utils import (
     accuracy,
     get_parameters,
 )
-from validation.losses import OCKLLoss
+from validation.losses import LOSS_REGISTRY
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
 
@@ -221,8 +221,15 @@ def train(epoch, train_loader, teacher_model, student_model, args):
     top5 = AverageMeter()
 
     optimizer = args.optimizer
-    loss_function_kl = nn.KLDivLoss(reduction="batchmean")
-    ockl_criterion = OCKLLoss() if args.w_ockl > 0 else None
+
+    # Resolve active losses from the registry once per train() call.
+    # weights[name] = w; active_terms = [(name, term_fn, w), ...] where w > 0.
+    weights = {name: float(getattr(args, f"w_{name}")) for name in LOSS_REGISTRY}
+    active_terms = [
+        (name, term_fn, weights[name])
+        for name, (term_fn, _default) in LOSS_REGISTRY.items()
+        if weights[name] > 0
+    ]
 
     teacher_model.eval()
     student_model.train()
@@ -236,7 +243,6 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
             pred_label = student_model(images)
             teacher_logits = teacher_model(mix_images)
-            soft_mix_label = F.softmax(teacher_logits / args.temperature, dim=1)
 
         if batch_idx % args.re_accum_steps == 0:
             optimizer.zero_grad()
@@ -245,16 +251,16 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
         pred_mix_label = student_model(mix_images)
 
-        soft_pred_mix_label = F.log_softmax(pred_mix_label / args.temperature, dim=1)
-        kd_loss = loss_function_kl(soft_pred_mix_label, soft_mix_label)
-        # Preserve bit-identical behavior when w_kl == 1.0 and no other terms.
-        loss = kd_loss if args.w_kl == 1.0 else args.w_kl * kd_loss
-
-        if args.w_ockl > 0:
-            ockl_loss = args.w_ockl * ockl_criterion(
-                pred_mix_label, teacher_logits, args.temperature
-            )
-            loss = loss + ockl_loss
+        # Composite student loss = sum_i w_i * term_i(student, teacher, T).
+        # Skip the multiply on the first contributing term when w == 1.0
+        # (preserves the upstream graph for stock RDED-style w_kl=1.0 runs).
+        loss = None
+        for _name, term_fn, w in active_terms:
+            term = term_fn(pred_mix_label, teacher_logits, args.temperature)
+            if loss is None:
+                loss = term if w == 1.0 else w * term
+            else:
+                loss = loss + w * term
 
         loss = loss / args.re_accum_steps
 
