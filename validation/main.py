@@ -34,6 +34,7 @@ from validation.utils import (
 from validation.losses import LOSS_REGISTRY
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
+from validation.curve_logger import init_curve, log_epoch
 
 
 def _find_last_linear(model):
@@ -189,6 +190,7 @@ def main_worker(args):
 
     last_top1 = 0.0
     last_nc = None
+    init_curve(args)
     for epoch in range(args.re_epochs):
         train(epoch, train_loader, teacher_model, student_model, args)
 
@@ -273,13 +275,15 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         top1.update(prec1.item(), n)
         top5.update(prec5.item(), n)
 
+    train_time = time.time() - t1
     printInfo = (
         "TRAIN Iter {}: loss = {:.6f},\t".format(epoch, objs.avg)
         + "Top-1 err = {:.6f},\t".format(100 - top1.avg)
         + "Top-5 err = {:.6f},\t".format(100 - top5.avg)
-        + "train_time = {:.6f}".format((time.time() - t1))
+        + "train_time = {:.6f}".format(train_time)
     )
     print(printInfo)
+    log_epoch(args, epoch, objs.avg, 100 - top1.avg, 100 - top5.avg, train_time)
     t1 = time.time()
 
 

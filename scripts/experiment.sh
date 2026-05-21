@@ -111,19 +111,21 @@ esac
 
 mkdir -p logs/runs
 
-# Resolve canonical weights = LOSS_REGISTRY defaults overridden by user-set values.
-# WEIGHTS_TAG is a stable filename slug (e.g. "kl1p0_ockl0p3") of nonzero weights.
-read -r WEIGHTS_TAG CANON_JSON < <(USER_JSON="$USER_WEIGHTS_JSON" python - <<'PY'
+# Resolve canonical run identifier (key + tag + canon weights) via the single
+# source of truth in validation/run_key.py. RUN_KEY drives both the .log and
+# logs/curves/.jsonl filenames so they share an exact basename.
+read -r RUN_KEY WEIGHTS_TAG CANON_JSON < <(
+  USER_JSON="$USER_WEIGHTS_JSON" \
+  DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" \
+  python - <<'PY'
 import json, os
-from validation.losses import LOSS_REGISTRY
+from validation.run_key import canonical_run_key
 user = json.loads(os.environ["USER_JSON"])
-canon = {name: float(user.get(name, default)) for name, (_, default) in LOSS_REGISTRY.items()}
-# tag from nonzero entries, sorted by name
-nz = sorted((n, w) for n, w in canon.items() if w > 0)
-def slug(w):
-    return f"{w:g}".replace(".", "p").replace("-", "neg")
-tag = "_".join(f"{n}{slug(w)}" for n, w in nz) or "noloss"
-print(tag, json.dumps(canon, sort_keys=True))
+key, tag, canon = canonical_run_key(
+    os.environ["DATASET"], os.environ["ARCH"], os.environ["STUD"],
+    int(os.environ["IPC"]), int(os.environ["SEED"]), user,
+)
+print(key, tag, json.dumps(canon, sort_keys=True))
 PY
 )
 
@@ -166,7 +168,7 @@ PY
   fi
 fi
 
-log="logs/runs/${DATASET}_${ARCH}_to_${STUD_ARCH}_ipc${IPC}_seed${SEED}_w${WEIGHTS_TAG}.log"
+log="logs/runs/${RUN_KEY}.log"
 
 py_args=(
   --subset       "$DATASET"
