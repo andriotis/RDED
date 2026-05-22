@@ -16,6 +16,8 @@
 #   --factor <int>                       default: 1
 #   --num-crop <int>                     default: 5
 #   --mipc <int>                         default: 300
+#   --monitor <csv>                      comma-separated loss-term names to log under no_grad
+#                                          (passed through to main.py; default empty)
 #   --skip-synth                         pass --skip-synth to main.py (paired protocol)
 #   --resume                             skip if a matching row is already in logs/results.jsonl
 #   --dry-run                            print the python command, don't execute
@@ -33,9 +35,12 @@ RE_EPOCHS=300
 FACTOR=1
 NUM_CROP=5
 MIPC=300
+MONITOR=""
 SKIP_SYNTH=0
 RESUME=0
 DRY_RUN=0
+SWEEP_NAME=""
+CELL_ID=""
 WEIGHTS_ARGS=()        # --w-<name> <val> pairs, verbatim passthrough to main.py
 USER_WEIGHTS_JSON="{}"  # collected user-set weights as JSON, used by resume key and log filename
 
@@ -54,9 +59,12 @@ while [[ $# -gt 0 ]]; do
     --factor)     shift; FACTOR="$1"; shift ;;
     --num-crop)   shift; NUM_CROP="$1"; shift ;;
     --mipc)       shift; MIPC="$1"; shift ;;
+    --monitor)    shift; MONITOR="$1"; shift ;;
     --skip-synth) SKIP_SYNTH=1; shift ;;
     --resume)     RESUME=1; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
+    --sweep-name) shift; SWEEP_NAME="$1"; shift ;;
+    --cell-id)    shift; CELL_ID="$1"; shift ;;
     -h|--help)    usage; exit 0 ;;
     --w-*)
       flag="$1"
@@ -168,6 +176,8 @@ fi
 
 log="logs/runs/${DATASET}_${ARCH}_to_${STUD_ARCH}_ipc${IPC}_seed${SEED}_w${WEIGHTS_TAG}.log"
 
+RUN_TAG="seed${SEED}_w${WEIGHTS_TAG}"
+
 py_args=(
   --subset       "$DATASET"
   --arch-name    "$ARCH"
@@ -178,9 +188,19 @@ py_args=(
   --ipc          "$IPC"
   --re-epochs    "$RE_EPOCHS"
   --seed         "$SEED"
+  --run-tag      "$RUN_TAG"
 )
+if [[ -n "$SWEEP_NAME" ]]; then
+  py_args+=(--sweep-name "$SWEEP_NAME")
+fi
+if [[ -n "$CELL_ID" ]]; then
+  py_args+=(--cell-id "$CELL_ID")
+fi
 if [[ ${#WEIGHTS_ARGS[@]} -gt 0 ]]; then
   py_args+=("${WEIGHTS_ARGS[@]}")
+fi
+if [[ -n "$MONITOR" ]]; then
+  py_args+=(--monitor "$MONITOR")
 fi
 [[ $SKIP_SYNTH -eq 1 ]] && py_args+=(--skip-synth)
 

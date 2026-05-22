@@ -1,0 +1,42 @@
+# OCKL-variant ablation: compare the negated-softmax forward KL (current `ockl`),
+# the standard-softmax forward KL on the same complement target (`occe`), and
+# the reverse-KL on the negated-softmax form (`ockl_rev`), all against the
+# KL-only baseline.
+#
+# `monitor:` evaluates the listed terms under no_grad each step and logs them
+# to Aim with the same per-term curve format. Every cell therefore exposes all
+# three OCKL-family curves regardless of which (if any) is the active loss
+# term -- the {kl: 1.0} cell is the "KL-only training, OCKL observed" case.
+# Names that are also active (w_<name> > 0) are deduplicated automatically.
+#
+# Run: python scripts/run_sweep.py scripts/sweeps/ockl_variants.yaml [--resume] [--dry-run]
+#
+# Cells: 1 (dataset, arch) block x 3 ipcs x 3 seeds x 4 weight configs = 36 total.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1, 10, 50]
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
+    weights:
+      - {kl: 1.0}
+    # - {kl: 1.0, ockl: 1.0}
+    # - {kl: 1.0, occe: 1.0}
+    # - {kl: 1.0, ockl_rev: 1.0}
+    monitor: "ockl"
+
+  - name: cifar100_conv3_ockl
+    dataset: cifar100
+    arch: conv3
+    weights:
+    - {kl: 1.0, ockl: 1.0}
+    # - {kl: 1.0, occe: 1.0}
+    # - {kl: 1.0, ockl_rev: 1.0}
+   

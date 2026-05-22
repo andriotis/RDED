@@ -3,6 +3,7 @@ import random
 import warnings
 import argparse
 
+import numpy as np
 import torch
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -34,6 +35,7 @@ from validation.utils import (
 from validation.losses import LOSS_REGISTRY
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
+from validation.aim_logger import AimLogger
 
 
 def _find_last_linear(model):
@@ -58,6 +60,7 @@ def set_worker_sharing_strategy(worker_id: int) -> None:
 def main(args):
     if args.seed is not None:
         random.seed(args.seed)
+        np.random.seed(args.seed)
         torch.manual_seed(args.seed)
     main_worker(args)
 
@@ -189,29 +192,38 @@ def main_worker(args):
 
     last_top1 = 0.0
     last_nc = None
-    for epoch in range(args.re_epochs):
-        train(epoch, train_loader, teacher_model, student_model, args)
+    tracker = AimLogger(args)
+    try:
+        for epoch in range(args.re_epochs):
+            tr_loss, tr_top1, tr_top5, tr_components = train(
+                epoch, train_loader, teacher_model, student_model, args
+            )
+            tracker.log_train(epoch, tr_loss, components=tr_components)
 
-        if epoch % 10 == 9 or epoch == args.re_epochs - 1:
-            if epoch > args.re_epochs * 0.8:
-                top1, nc = validate(student_model, args, epoch)
-                last_top1 = top1
-                last_nc = nc
+            if epoch % 10 == 9 or epoch == args.re_epochs - 1:
+                if epoch > args.re_epochs * 0.8:
+                    vl_loss, top1, vl_top5, nc = validate(student_model, args, epoch)
+                    tracker.log_val(epoch, vl_loss)
+                    last_top1 = top1
+                    last_nc = nc
+                else:
+                    top1 = 0
             else:
                 top1 = 0
-        else:
-            top1 = 0
 
-        scheduler.step()
-        if top1 > best_acc1:
-            best_acc1 = max(top1, best_acc1)
-            best_epoch = epoch
+            scheduler.step()
+            if top1 > best_acc1:
+                best_acc1 = max(top1, best_acc1)
+                best_epoch = epoch
 
-    print(f"Train Finish! Best accuracy is {best_acc1}@{best_epoch}")
-    if last_nc is not None:
-        print(f"Final NC metrics: {last_nc}")
-    results_path = log_run(args, best_top1=best_acc1, final_top1=last_top1, nc_metrics=last_nc)
-    print(f"Logged run to {results_path}")
+        print(f"Train Finish! Best accuracy is {best_acc1}@{best_epoch}")
+        if last_nc is not None:
+            print(f"Final NC metrics: {last_nc}")
+        results_path = log_run(args, best_top1=best_acc1, final_top1=last_top1, nc_metrics=last_nc)
+        print(f"Logged run to {results_path}")
+        tracker.log_hparams(args, best_top1=best_acc1, final_top1=last_top1)
+    finally:
+        tracker.close()
 
 
 def train(epoch, train_loader, teacher_model, student_model, args):
@@ -230,6 +242,21 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         for name, (term_fn, _default) in LOSS_REGISTRY.items()
         if weights[name] > 0
     ]
+    # Monitor terms: computed under no_grad and logged, never in the backward graph.
+    # Dedup against active to avoid double-tracking.
+    active_names = {n for n, _, _ in active_terms}
+    monitor_names = [s.strip() for s in (getattr(args, "monitor", "") or "").split(",") if s.strip()]
+    unknown = [n for n in monitor_names if n not in LOSS_REGISTRY]
+    if unknown:
+        raise ValueError(f"--monitor names not in LOSS_REGISTRY: {unknown}")
+    monitor_terms = [
+        (name, LOSS_REGISTRY[name][0])
+        for name in monitor_names
+        if name not in active_names
+    ]
+    term_meters = {name: AverageMeter() for name, _, _ in active_terms}
+    for name, _ in monitor_terms:
+        term_meters[name] = AverageMeter()
 
     teacher_model.eval()
     student_model.train()
@@ -252,15 +279,25 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         pred_mix_label = student_model(mix_images)
 
         # Composite student loss = sum_i w_i * term_i(student, teacher, T).
+        # All terms share args.temperature.
         # Skip the multiply on the first contributing term when w == 1.0
         # (preserves the upstream graph for stock RDED-style w_kl=1.0 runs).
         loss = None
+        n = images.size(0)
         for _name, term_fn, w in active_terms:
             term = term_fn(pred_mix_label, teacher_logits, args.temperature)
+            term_meters[_name].update(term.item(), n)
             if loss is None:
                 loss = term if w == 1.0 else w * term
             else:
                 loss = loss + w * term
+
+        # Monitor pass: compute + log, no gradient contribution.
+        if monitor_terms:
+            with torch.no_grad():
+                for _name, term_fn in monitor_terms:
+                    term = term_fn(pred_mix_label, teacher_logits, args.temperature)
+                    term_meters[_name].update(term.item(), n)
 
         loss = loss / args.re_accum_steps
 
@@ -268,7 +305,6 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         if batch_idx % args.re_accum_steps == (args.re_accum_steps - 1):
             optimizer.step()
 
-        n = images.size(0)
         objs.update(loss.item(), n)
         top1.update(prec1.item(), n)
         top5.update(prec5.item(), n)
@@ -281,6 +317,12 @@ def train(epoch, train_loader, teacher_model, student_model, args):
     )
     print(printInfo)
     t1 = time.time()
+    return (
+        objs.avg,
+        top1.avg,
+        top5.avg,
+        {name: m.avg for name, m in term_meters.items()},
+    )
 
 
 def validate(model, args, epoch=None):
@@ -340,7 +382,7 @@ def validate(model, args, epoch=None):
             nc["nc1"], nc["nc2"], nc["nc3"], nc["nc4"]
         )
     print(logInfo)
-    return top1.avg, nc
+    return objs.avg, top1.avg, top5.avg, nc
 
 
 if __name__ == "__main__":

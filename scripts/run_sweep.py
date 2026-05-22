@@ -54,6 +54,7 @@ SCALAR_FLAG_KEYS = [
     ("factor",     "--factor"),
     ("num_crop",   "--num-crop"),
     ("mipc",       "--mipc"),
+    ("monitor",    "--monitor"),
 ]
 BOOL_FLAG_KEYS = [
     ("skip_synth", "--skip-synth"),
@@ -210,9 +211,12 @@ def main():
     print(f"Sweep: {args.config} | {len(experiments)} experiment blocks | {len(expanded)} cells",
           flush=True)
 
+    sweep_name = os.path.splitext(os.path.basename(args.config))[0]
+
     n_ran = n_failed = 0
-    for name, params in expanded:
+    for cell_idx, (name, params) in enumerate(expanded):
         argv = build_argv(params)
+        argv += ["--sweep-name", sweep_name, "--cell-id", f"{name}:{cell_idx:04d}"]
         if args.resume:
             argv.append("--resume")
         if args.dry_run:

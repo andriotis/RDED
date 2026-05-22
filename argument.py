@@ -176,6 +176,44 @@ parser.add_argument(
     help="skip synthesis and reuse existing syn_data (paired-protocol primitive: synth once, train N students)",
 )
 
+# Aim tracking (augments results.jsonl; does not replace it).
+parser.add_argument(
+    "--aim-repo",
+    type=str,
+    default="./logs/aim",
+    help="Aim repo path (per run: experiment={exp_name}, run.name={run_tag})",
+)
+parser.add_argument(
+    "--run-tag",
+    type=str,
+    default="",
+    help="Aim run name. Empty -> derived from seed + nonzero loss weights",
+)
+parser.add_argument(
+    "--sweep-name",
+    type=str,
+    default="",
+    help="sweep identifier (YAML stem); recorded in Aim hparams for cross-run grouping",
+)
+parser.add_argument(
+    "--cell-id",
+    type=str,
+    default="",
+    help="sweep cell identifier (e.g. row index); recorded in Aim hparams",
+)
+parser.add_argument(
+    "--disable-aim",
+    action="store_true",
+    help="skip Aim logging entirely (results.jsonl still written)",
+)
+parser.add_argument(
+    "--monitor",
+    type=str,
+    default="",
+    help="comma-separated LOSS_REGISTRY names to compute under no_grad and log "
+         "without contributing to backprop. Names that are also active "
+         "(w_<name> > 0) are deduplicated and treated as active only.",
+)
 args = parser.parse_args()
 
 args.train_dir = f"./data/{args.subset}/train/"

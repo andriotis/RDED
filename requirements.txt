@@ -14,5 +14,10 @@ pandas
 tabulate
 PyYAML
 
+# Per-run experiment tracking (validation/aim_logger.py).
+# Pinned: aim 3.29 has a regression where run["key"] = value (used for the
+# hparams/summary blocks) doesn't persist across run.close().
+aim==3.27.0
+
 # scripts/teachers.py model download (Google Drive folder fetch).
 gdown
