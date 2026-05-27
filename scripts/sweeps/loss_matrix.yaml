@@ -8,10 +8,18 @@
 
 defaults:
   seed: [42, 43, 44]
-  ipc: [1, 10, 50]
+  ipc: [1, 10 ,50]
   weights:
-    - {kl: 1.0}
-    - {kl: 1.0, ockl: 1.0}
+    - {kl: 1.0}                  # stock RDED baseline
+    # - {kl: 1.0, ockl: 1.0}       # KL + one-cold KL (existing)
+    # - {gce: 1.0}                 # pure GCE (q=0.7 default via --gce-q)
+    # - {kl: 1.0, rce: 1.0}        # SCE = alpha*CE + beta*RCE (alpha=beta=1)
+    # - {kl: 1.0, scce: 1.0}       # KL + soft complementary CE
+    # - {kl: 1.0, gce: 1.0}        # mixture of KL and GCE
+    - {kl: 1.0, socce: 0.00001}
+    - {kl: 1.0, socce: 0.0001}
+    - {kl: 1.0, socce: 0.001}
+    - {kl: 1.0, socce: 0.01}
   factor: 1
   num_crop: 5
   mipc: 300
@@ -26,10 +34,10 @@ experiments:
     dataset: cifar100
     arch: resnet18_modified
 
-  - name: tinyimagenet_conv4
-    dataset: tinyimagenet
-    arch: conv4
+  # - name: tinyimagenet_conv4
+  #   dataset: tinyimagenet
+  #   arch: conv4
 
-  - name: tinyimagenet_resnet18
-    dataset: tinyimagenet
-    arch: resnet18_modified
+  # - name: tinyimagenet_resnet18
+  #   dataset: tinyimagenet
+  #   arch: resnet18_modified

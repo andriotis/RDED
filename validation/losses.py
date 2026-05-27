@@ -1,22 +1,33 @@
+import collections
+
+import torch
 import torch.nn.functional as F
 
 
 # Term-function contract for the registry:
-#   def <name>_term(student_logits_mixed, teacher_logits_mixed, temperature)
+#   def <name>_term(student_logits_mixed, teacher_logits_mixed, temperature,
+#                   args=None, mix_info=None)
 #       -> scalar tensor (batchmean-reduced)
 #
+# `args` carries optional per-loss hyperparameters (e.g. args.gce_q,
+# args.sce_log_floor). `mix_info` carries the cutmix/mixup metadata
+# (labels, rand_index, lam, num_classes) for terms that build hard-label
+# targets from the mixing. Terms that don't need either argument ignore it.
 # Module-level term wrappers below give every entry the same call shape,
 # so the training loop can compose them with no per-loss branching.
 
 
-def kl_term(student_logits_mixed, teacher_logits_mixed, temperature):
+MixInfo = collections.namedtuple("MixInfo", "labels rand_index lam num_classes")
+
+
+def kl_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
     """Standard FKD knowledge-distillation term (matches upstream RDED's KL)."""
     log_q = F.log_softmax(student_logits_mixed / temperature, dim=1)
     p = F.softmax(teacher_logits_mixed / temperature, dim=1)
     return F.kl_div(log_q, p, reduction="batchmean")
 
 
-def ockl_term(student_logits_mixed, teacher_logits_mixed, temperature):
+def ockl_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
     """One-Cold KL-divergence loss (OCKL).
 
     Both teacher and student logits are computed on the same cutmix-mixed
@@ -33,7 +44,7 @@ def ockl_term(student_logits_mixed, teacher_logits_mixed, temperature):
     return F.kl_div(log_q, p_inv, reduction="batchmean")
 
 
-def ockl_logitneg_term(student_logits_mixed, teacher_logits_mixed, temperature):
+def ockl_logitneg_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
     """Symmetric negated-softmax KD: negate teacher LOGITS, not invert teacher
     PROBABILITIES.
 
@@ -53,9 +64,92 @@ def ockl_logitneg_term(student_logits_mixed, teacher_logits_mixed, temperature):
     return F.kl_div(log_q, p_t_neg, reduction="batchmean")
 
 
+def gce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Generalized Cross-Entropy (Zhang & Sabuncu 2018), soft-label form.
+
+      L_GCE = mean_batch  sum_c  y_c * (1 - p_c^q) / q
+
+    Reduces to CE as q -> 0, to MAE at q = 1. Noise-tolerant in the soft
+    teacher-label regime since the gradient w.r.t. logits is bounded by
+    p_c^q (vs unbounded for plain CE).
+    """
+    q = float(getattr(args, "gce_q", 0.7))
+    p = F.softmax(student_logits_mixed / temperature, dim=1)
+    y = F.softmax(teacher_logits_mixed / temperature, dim=1)
+    per_sample = (y * (1.0 - p.pow(q)) / q).sum(dim=1)
+    return per_sample.mean()
+
+
+def rce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Reverse Cross-Entropy (Wang et al. 2019), soft-label form.
+
+      L_RCE = mean_batch  -sum_c  p_c * log(max(y_c, exp(A)))
+
+    The clamp at exp(A) replaces the log(0) substitution used with one-hot
+    labels in the original paper; default A = -4 matches their setting.
+    Compose with kl_term to realize SCE: --w-kl ALPHA --w-rce BETA.
+    """
+    A = float(getattr(args, "sce_log_floor", -4.0))
+    p = F.softmax(student_logits_mixed / temperature, dim=1)
+    y = F.softmax(teacher_logits_mixed / temperature, dim=1)
+    log_y = torch.log(y.clamp(min=torch.exp(torch.tensor(A, dtype=y.dtype, device=y.device))))
+    per_sample = -(p * log_y).sum(dim=1)
+    return per_sample.mean()
+
+
+def scce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Soft Complementary Cross-Entropy.
+
+      L_sCCE = mean_batch  -sum_c  (1 - y_c) * log(1 - p_c)
+
+    Uses log1p(-p) with p clamped below 1 for numerical stability when the
+    student becomes confident. Estimates the same V-information quantity as
+    KL from the rejection side of the teacher distribution.
+    """
+    p = F.softmax(student_logits_mixed / temperature, dim=1)
+    y = F.softmax(teacher_logits_mixed / temperature, dim=1)
+    log_one_minus_p = torch.log1p(-p.clamp(max=1.0 - 1e-7))
+    per_sample = -((1.0 - y) * log_one_minus_p).sum(dim=1)
+    return per_sample.mean()
+
+
+def socce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Soft One-Cold Cross-Entropy (anti-class structural regularizer).
+
+    Target is built from the cutmix/mixup HARD ground-truth labels, NOT from
+    the teacher's soft prediction:
+      y_mix_c = lam * 1[c = y_i] + (1 - lam) * 1[c = y_partner]
+      y_bar_c = (1 - y_mix_c) / (N - 1)        # valid distribution, sums to 1
+    The OCCE cross-entropy is then taken on the student's RAW (un-tempered)
+    logits z_S:
+      L_sOCCE = mean_batch  -sum_c y_bar_c * log(softmax(-z_S)_c)
+
+    When mix_info.rand_index is None (no mixing), reduces to one-hot
+    one-cold encoding from the OCCE paper.
+    """
+    if mix_info is None or mix_info.labels is None:
+        raise ValueError("socce_term requires mix_info with labels")
+    labels = mix_info.labels
+    rand_index = mix_info.rand_index
+    lam = float(mix_info.lam) if mix_info.lam is not None else 1.0
+    num_classes = mix_info.num_classes
+    B = student_logits_mixed.size(0)
+
+    y_mix = torch.zeros(B, num_classes, device=student_logits_mixed.device, dtype=student_logits_mixed.dtype)
+    y_mix.scatter_(1, labels.view(-1, 1), lam)
+    if rand_index is not None and lam < 1.0:
+        partner = labels[rand_index.to(labels.device)].view(-1, 1)
+        y_mix.scatter_add_(1, partner, torch.full_like(partner, 1.0 - lam, dtype=y_mix.dtype))
+
+    y_bar = (1.0 - y_mix) / (num_classes - 1)
+    log_anti = F.log_softmax(-student_logits_mixed, dim=1)
+    per_sample = -(y_bar * log_anti).sum(dim=1)
+    return per_sample.mean()
+
+
 # Single source of truth for student-loss terms available to validation/main.py.
 # To add a new loss "A":
-#   1. Implement `def A_term(student_logits_mixed, teacher_logits_mixed, temperature)`
+#   1. Implement `def A_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None)`
 #      returning a batchmean-reduced scalar tensor.
 #   2. Add `"A": (A_term, <default_weight>)` below.
 # argument.py auto-adds --w-A; validation/main.py auto-composes; results_logger
@@ -64,4 +158,8 @@ LOSS_REGISTRY = {
     "kl":            (kl_term,            1.0),  # stock RDED behavior when no flags are passed
     "ockl":          (ockl_term,          0.0),  # negated-softmax vs inverted target (forward KL)
     "ockl_logitneg": (ockl_logitneg_term, 0.0),  # negate teacher logits (not probabilities); shares KL's minimum
+    "gce":           (gce_term,           0.0),  # noise-tolerant CE<->MAE interpolant (q via --gce-q)
+    "rce":           (rce_term,           0.0),  # reverse CE; compose with kl for SCE (log floor via --sce-log-floor)
+    "scce":          (scce_term,          0.0),  # soft complementary CE; rejection-side V-information estimator
+    "socce":         (socce_term,         0.0),  # soft one-cold CE on cutmix hard labels, raw student logits (no T)
 }

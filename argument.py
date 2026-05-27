@@ -170,6 +170,21 @@ for _name, (_, _default_w) in LOSS_REGISTRY.items():
         dest=f"w_{_name}",
         help=f"weight on the {_name.upper()} student-loss term (default {_default_w}; 0 disables)",
     )
+
+# Per-loss hyperparameters (read by the corresponding term functions in losses.py).
+parser.add_argument(
+    "--gce-q",
+    type=float,
+    default=0.7,
+    help="q for GCE; in (0, 1]. q->0 reduces to CE, q=1 is MAE (default 0.7)",
+)
+parser.add_argument(
+    "--sce-log-floor",
+    type=float,
+    default=-4.0,
+    help="log floor A for RCE: y is clamped to >= exp(A) before log (default -4.0, matches Wang et al.)",
+)
+
 parser.add_argument(
     "--skip-synth",
     action="store_true",

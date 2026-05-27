@@ -32,7 +32,7 @@ from validation.utils import (
     accuracy,
     get_parameters,
 )
-from validation.losses import LOSS_REGISTRY
+from validation.losses import LOSS_REGISTRY, MixInfo
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
@@ -266,7 +266,13 @@ def train(epoch, train_loader, teacher_model, student_model, args):
             images = images.cuda()
             labels = labels.cuda()
 
-            mix_images, _, _, _ = mix_aug(images, args)
+            mix_images, rand_index, lam, _ = mix_aug(images, args)
+            mix_info = MixInfo(
+                labels=labels,
+                rand_index=rand_index,
+                lam=lam if lam is not None else 1.0,
+                num_classes=args.nclass,
+            )
 
             pred_label = student_model(images)
             teacher_logits = teacher_model(mix_images)
@@ -285,7 +291,7 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         loss = None
         n = images.size(0)
         for _name, term_fn, w in active_terms:
-            term = term_fn(pred_mix_label, teacher_logits, args.temperature)
+            term = term_fn(pred_mix_label, teacher_logits, args.temperature, args, mix_info)
             term_meters[_name].update(term.item(), n)
             if loss is None:
                 loss = term if w == 1.0 else w * term
@@ -296,7 +302,7 @@ def train(epoch, train_loader, teacher_model, student_model, args):
         if monitor_terms:
             with torch.no_grad():
                 for _name, term_fn in monitor_terms:
-                    term = term_fn(pred_mix_label, teacher_logits, args.temperature)
+                    term = term_fn(pred_mix_label, teacher_logits, args.temperature, args, mix_info)
                     term_meters[_name].update(term.item(), n)
 
         loss = loss / args.re_accum_steps

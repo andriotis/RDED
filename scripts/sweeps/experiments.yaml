@@ -1,0 +1,19 @@
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1, 10, 50]
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
+    weights:
+    - {kl: 1.0}
+    - {kl: 1.0, ockl: 10e-4}
+    - {kl: 1.0, ockl: 10e-3}
+    - {kl: 1.0, ockl: 10e-2}
+    - {kl: 1.0, ockl: 10e-1}
+    - {kl: 1.0, ockl: 10e-0}
