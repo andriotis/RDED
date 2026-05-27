@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 import torchvision.models as models
 from synthesize.utils import *
-from validation.utils import ImageFolder
+from validation.utils import ImageFolder, make_loader_kwargs
 
 
 def init_images(args, model=None):
@@ -43,6 +43,7 @@ def init_images(args, model=None):
         shuffle=False,
         num_workers=args.workers,
         pin_memory=False,
+        **make_loader_kwargs(args.seed),
     )
 
     for c, (images, labels) in enumerate(tqdm(train_loader)):

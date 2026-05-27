@@ -16,10 +16,11 @@ defaults:
     # - {kl: 1.0, rce: 1.0}        # SCE = alpha*CE + beta*RCE (alpha=beta=1)
     # - {kl: 1.0, scce: 1.0}       # KL + soft complementary CE
     # - {kl: 1.0, gce: 1.0}        # mixture of KL and GCE
-    - {kl: 1.0, socce: 0.00001}
-    - {kl: 1.0, socce: 0.0001}
-    - {kl: 1.0, socce: 0.001}
-    - {kl: 1.0, socce: 0.01}
+    - {kl: 1.0, socce: 10e-2}
+    - {kl: 1.0, socce: 10e-3}
+    - {kl: 1.0, socce: 10e-4}
+    - {kl: 1.0, socce: 10e-5}
+    - {kl: 1.0, socce: 10e-6}
   factor: 1
   num_crop: 5
   mipc: 300
@@ -30,9 +31,9 @@ experiments:
     dataset: cifar100
     arch: conv3
 
-  - name: cifar100_resnet18
-    dataset: cifar100
-    arch: resnet18_modified
+  # - name: cifar100_resnet18
+  #   dataset: cifar100
+  #   arch: resnet18_modified
 
   # - name: tinyimagenet_conv4
   #   dataset: tinyimagenet

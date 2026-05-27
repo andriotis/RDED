@@ -2,10 +2,54 @@ import torch
 import numpy as np
 import os
 import torch.distributed
+import torch.multiprocessing
 import torchvision
 from torchvision.transforms import functional as t_F
 import torch.nn.functional as F
 import random
+
+
+_SHARING_STRATEGY = "file_system"
+
+
+def seed_everything(seed: int) -> None:
+    """Pin every RNG and CUDA backend used by the RDED pipeline.
+
+    Call once before either synth or validation runs (also safe to call again
+    at the top of a phase — it just resets state). PYTHONHASHSEED must be
+    exported by the parent shell to take effect; we set it here too for
+    completeness when it doesn't already match.
+    """
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.multiprocessing.set_sharing_strategy(_SHARING_STRATEGY)
+
+
+def _seeded_worker_init_fn(worker_id: int) -> None:
+    torch.multiprocessing.set_sharing_strategy(_SHARING_STRATEGY)
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def make_loader_kwargs(seed: int) -> dict:
+    """Reproducibility kwargs for `torch.utils.data.DataLoader(...)`.
+
+    Returns a dict with `generator` (seeded) and `worker_init_fn` (seeds
+    random/numpy inside each worker; torch is auto-seeded by PyTorch).
+    """
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return {"generator": g, "worker_init_fn": _seeded_worker_init_fn}
 
 
 # keep top k largest values, and smooth others

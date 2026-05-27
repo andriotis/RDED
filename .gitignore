@@ -19,3 +19,5 @@ env.yaml
 !main.sh
 !run.sh
 
+.claude/
+

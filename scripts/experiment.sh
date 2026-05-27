@@ -204,6 +204,9 @@ if [[ -n "$MONITOR" ]]; then
 fi
 [[ $SKIP_SYNTH -eq 1 ]] && py_args+=(--skip-synth)
 
+export PYTHONHASHSEED="$SEED"
+export CUBLAS_WORKSPACE_CONFIG=":4096:8"
+
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[dry-run] python ./main.py ${py_args[*]} -> $log"
 else

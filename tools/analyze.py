@@ -135,7 +135,6 @@ def main():
             paper = f"{pm:.1f} +/- {ps:.1f}"
         else:
             paper = "--"
-        row = {"Dataset": d, "Arch": a, "Stud": s, "IPC": ipc, "Paper": paper}
         best_mean = None
         cell_means = {}
         for ck in col_keys:
@@ -155,8 +154,10 @@ def main():
             if (best_mean is not None and cell_means[ck] is not None
                     and cell_means[ck] == best_mean and cell != "--"):
                 cell = f"**{cell}**"
-            row[col_label(ck)] = cell
-        rows_out.append(row)
+            rows_out.append({
+                "Dataset": d, "Arch": a, "Stud": s, "IPC": ipc,
+                "Paper": paper, "Loss": col_label(ck), "Top-1": cell,
+            })
 
     print(f"\n## Best top-1 accuracy (mean +/- std over {EXPECTED_SEEDS} seeds)\n")
     print(pd.DataFrame(rows_out).to_markdown(index=False))

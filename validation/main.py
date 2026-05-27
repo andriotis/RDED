@@ -31,6 +31,8 @@ from validation.utils import (
     AverageMeter,
     accuracy,
     get_parameters,
+    seed_everything,
+    make_loader_kwargs,
 )
 from validation.losses import LOSS_REGISTRY, MixInfo
 from validation.nc_metrics import compute_nc_metrics
@@ -49,23 +51,12 @@ def _find_last_linear(model):
     return last
 
 
-sharing_strategy = "file_system"
-torch.multiprocessing.set_sharing_strategy(sharing_strategy)
-
-
-def set_worker_sharing_strategy(worker_id: int) -> None:
-    torch.multiprocessing.set_sharing_strategy(sharing_strategy)
-
-
 def main(args):
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
     main_worker(args)
 
 
 def main_worker(args):
+    seed_everything(args.seed)
     print("=> using pytorch pre-trained teacher model '{}'".format(args.arch_name))
     teacher_model = load_model(
         model_name=args.arch_name,
@@ -89,8 +80,6 @@ def main_worker(args):
     # freeze all layers
     for param in teacher_model.parameters():
         param.requires_grad = False
-
-    cudnn.benchmark = True
 
     # optimizer
     if args.sgd:
@@ -157,7 +146,7 @@ def main_worker(args):
         shuffle=True,
         num_workers=args.workers,
         pin_memory=True,
-        worker_init_fn=set_worker_sharing_strategy,
+        **make_loader_kwargs(args.seed),
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -179,7 +168,7 @@ def main_worker(args):
         shuffle=False,
         num_workers=args.workers,
         pin_memory=True,
-        worker_init_fn=set_worker_sharing_strategy,
+        **make_loader_kwargs(args.seed),
     )
     print("load data successfully")
 
