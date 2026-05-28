@@ -1,0 +1,19 @@
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1, 10, 50]
+  weights:
+    - {kl: 1.0, gce: 0.0}
+    - {kl: 1.0, gce: 1.0}
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
+
+  - name: cifar100_resnet18
+    dataset: cifar100
+    arch: resnet18_modified

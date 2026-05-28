@@ -1,16 +1,17 @@
-# Loss matrix: KL baseline AND KL+OCKL across both datasets and all compatible
-# (arch, ipc, seed) combinations. Uses the list-of-dicts shape for `weights:`
-# so each cell expands into 2 alternative configurations (one per dict).
+# Loss matrix: KL baseline and KL+sOCCE gamma sweep on the canonical
+# cifar100/resnet18_modified cell. The conv3 block is already complete
+# (see logs/socce_diagnosis.md); resnet18_modified is the new target.
+# Uses the list-of-dicts shape for `weights:` (one cell per dict).
 #
 # Run: python scripts/run_sweep.py scripts/sweeps/loss_matrix.yaml [--resume] [--dry-run]
 #
-# Cells: 4 (dataset, arch) blocks x 3 ipcs x 3 seeds x 2 weight configs = 72 total.
+# Active cells: 1 (dataset, arch) block x 3 ipcs x 3 seeds x 6 weight configs = 54.
 
 defaults:
   seed: [42, 43, 44]
-  ipc: [1, 10 ,50]
+  ipc: [10]
   weights:
-    - {kl: 1.0}                  # stock RDED baseline
+    # - {kl: 1.0}                  # stock RDED baseline
     # - {kl: 1.0, ockl: 1.0}       # KL + one-cold KL (existing)
     # - {gce: 1.0}                 # pure GCE (q=0.7 default via --gce-q)
     # - {kl: 1.0, rce: 1.0}        # SCE = alpha*CE + beta*RCE (alpha=beta=1)
@@ -27,13 +28,13 @@ defaults:
   re_epochs: 300
 
 experiments:
-  - name: cifar100_conv3
+  - name: cifar100_conv3            # done (see logs/socce_diagnosis.md)
     dataset: cifar100
     arch: conv3
 
-  # - name: cifar100_resnet18
-  #   dataset: cifar100
-  #   arch: resnet18_modified
+  - name: cifar100_resnet18
+    dataset: cifar100
+    arch: resnet18_modified
 
   # - name: tinyimagenet_conv4
   #   dataset: tinyimagenet

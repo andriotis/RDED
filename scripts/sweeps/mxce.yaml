@@ -1,0 +1,26 @@
+# Head-to-head: stock KL vs mxce (mix-aware soft-label CE).
+# Same cell, same seeds, synth re-done per run (matched RDED protocol).
+#
+#   kl_term:   target = softmax(teacher(mix_images)/T)           # teacher sees the spliced image
+#   mxce_term: target = lam*softmax(teacher(host)/T)
+#                     + (1-lam)*softmax(teacher(partner)/T)      # teacher sees the originals
+#
+# Run: python scripts/run_sweep.py scripts/sweeps/mxce.yaml [--resume] [--dry-run]
+#
+# Active cells: 1 (dataset, arch) block x 1 ipc x 3 seeds x 2 weight configs = 6.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1, 10, 50]
+  weights:
+    - {kl: 1.0, mxce: 0.0}  # stock RDED baseline (re-run under same protocol for matched comparison)
+    - {kl: 0.0, mxce: 1.0}  # target swap: per-original-image teacher predictions, convex-mixed
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3

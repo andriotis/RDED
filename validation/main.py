@@ -34,7 +34,7 @@ from validation.utils import (
     seed_everything,
     make_loader_kwargs,
 )
-from validation.losses import LOSS_REGISTRY, MixInfo
+from validation.losses import LOSS_REGISTRY, MixInfo, TERMS_NEEDING_UNMIXED_TEACHER
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
@@ -247,6 +247,12 @@ def train(epoch, train_loader, teacher_model, student_model, args):
     for name, _ in monitor_terms:
         term_meters[name] = AverageMeter()
 
+    # Gate the extra un-mixed teacher forward to terms that need it (currently mxce).
+    # Active terms and monitor terms both count.
+    needs_unmixed_teacher = (
+        {n for n, _, _ in active_terms} | {n for n, _ in monitor_terms}
+    ) & TERMS_NEEDING_UNMIXED_TEACHER
+
     teacher_model.eval()
     student_model.train()
     t1 = time.time()
@@ -256,11 +262,13 @@ def train(epoch, train_loader, teacher_model, student_model, args):
             labels = labels.cuda()
 
             mix_images, rand_index, lam, _ = mix_aug(images, args)
+            teacher_logits_unmixed = teacher_model(images) if needs_unmixed_teacher else None
             mix_info = MixInfo(
                 labels=labels,
                 rand_index=rand_index,
                 lam=lam if lam is not None else 1.0,
                 num_classes=args.nclass,
+                teacher_logits_unmixed=teacher_logits_unmixed,
             )
 
             pred_label = student_model(images)

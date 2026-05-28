@@ -17,7 +17,13 @@ import torch.nn.functional as F
 # so the training loop can compose them with no per-loss branching.
 
 
-MixInfo = collections.namedtuple("MixInfo", "labels rand_index lam num_classes")
+MixInfo = collections.namedtuple(
+    "MixInfo",
+    "labels rand_index lam num_classes teacher_logits_unmixed",
+)
+# teacher_logits_unmixed is optional: only populated when a term that needs the
+# teacher's prediction on the original un-mixed images is active (currently mxce).
+MixInfo.__new__.__defaults__ = (None,)
 
 
 def kl_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
@@ -113,6 +119,39 @@ def scce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None
     return per_sample.mean()
 
 
+def mxce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Mix-aware KL: teacher target is the convex mix of per-original-image
+    teacher predictions, instead of the teacher's prediction on the mixed image.
+
+      p_T_host    = softmax(teacher(images)            / T)
+      p_T_partner = softmax(teacher(images[rand_idx])  / T)
+      p_T_target  = lam * p_T_host + (1 - lam) * p_T_partner
+      L_mxce      = KL( log_softmax(student(mix_images)/T)  ||  p_T_target )
+
+    Same student forward as kl_term (on the mixed image) -- only the target
+    changes. Requires mix_info.teacher_logits_unmixed to be the teacher's
+    logits on the un-mixed `images` (main.py populates this when mxce is active).
+    When mix_info.rand_index is None (no cutmix/mixup), the target collapses to
+    p_T_host and the loss equals kl_term up to the un-mixed teacher pass.
+    """
+    if mix_info is None or mix_info.teacher_logits_unmixed is None:
+        raise ValueError(
+            "mxce_term requires mix_info.teacher_logits_unmixed; "
+            "main.py must compute teacher_model(images) when --w-mxce > 0"
+        )
+    z_T_un = mix_info.teacher_logits_unmixed
+    p_T_host = F.softmax(z_T_un / temperature, dim=1)
+    if mix_info.rand_index is None or mix_info.lam is None or float(mix_info.lam) >= 1.0:
+        p_T_target = p_T_host
+    else:
+        lam = float(mix_info.lam)
+        partner_idx = mix_info.rand_index.to(z_T_un.device)
+        p_T_partner = p_T_host[partner_idx]
+        p_T_target = lam * p_T_host + (1.0 - lam) * p_T_partner
+    log_q = F.log_softmax(student_logits_mixed / temperature, dim=1)
+    return F.kl_div(log_q, p_T_target, reduction="batchmean")
+
+
 def socce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
     """Soft One-Cold Cross-Entropy (anti-class structural regularizer).
 
@@ -162,4 +201,8 @@ LOSS_REGISTRY = {
     "rce":           (rce_term,           0.0),  # reverse CE; compose with kl for SCE (log floor via --sce-log-floor)
     "scce":          (scce_term,          0.0),  # soft complementary CE; rejection-side V-information estimator
     "socce":         (socce_term,         0.0),  # soft one-cold CE on cutmix hard labels, raw student logits (no T)
+    "mxce":          (mxce_term,          0.0),  # mix-aware KL: target = lam*p_T(host) + (1-lam)*p_T(partner)
 }
+
+# Terms that require teacher_logits on the un-mixed images (populated by main.py).
+TERMS_NEEDING_UNMIXED_TEACHER = frozenset({"mxce"})

@@ -1,0 +1,41 @@
+# Head-to-head comparison of every loss term registered in
+# validation/losses.py:LOSS_REGISTRY. One canonical composition per term:
+#
+#   {kl:1.0}                        stock RDED baseline (anchor)
+#   {kl:1.0, ockl:1.0}              KL + One-Cold KL (forward KL on inverted teacher target)
+#   {kl:1.0, ockl_logitneg:1.0}     KL + negated-teacher-logit KL (shares KL's minimum)
+#   {kl:1.0, gce:1.0}               KL + Generalized CE  (q=0.7 default via --gce-q)
+#   {gce:1.0}                       GCE alone (noise-tolerant CE; q=0.7)
+#   {kl:1.0, rce:1.0}               SCE = alpha*KL + beta*RCE (alpha=beta=1; log floor A=-4)
+#   {kl:1.0, scce:1.0}              KL + Soft Complementary CE (rejection-side V-info)
+#   {kl:1.0, socce:1e-5}            KL + soft One-Cold CE at the lowest-harm gamma from the diagnosis
+#   {kl:1.0, mxce:1.0}              KL + mxce (additive; preserves stock KL signal, adds the convex-mix target)
+#   {kl:0.0, mxce:1.0}              mxce alone (target swap; expected catastrophic per Step 4 diagnosis)
+#
+# Run: python scripts/run_sweep.py scripts/sweeps/all_losses.yaml [--resume] [--dry-run]
+#
+# Active cells: 1 (dataset, arch) block x 3 ipcs x 3 seeds x 10 weight configs = 90.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [10]
+  weights:
+    - {kl: 1.0}
+    - {kl: 1.0, ockl: 1.0}
+    - {kl: 1.0, ockl_logitneg: 1.0}
+    - {kl: 1.0, gce: 1.0}
+    - {kl: 0.0, gce: 1.0}
+    - {kl: 1.0, rce: 1.0}
+    - {kl: 1.0, scce: 1.0}
+    - {kl: 1.0, socce: 1e-5}
+    - {kl: 1.0, mxce: 1.0}
+    - {kl: 0.0, mxce: 1.0}
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
