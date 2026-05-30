@@ -195,12 +195,14 @@ def socce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=Non
 # auto-logs it under row["weights"]["A"]; sweep YAMLs can use `weights: {A: 0.5}`.
 LOSS_REGISTRY = {
     "kl":            (kl_term,            1.0),  # stock RDED behavior when no flags are passed
-    "ockl":          (ockl_term,          0.0),  # negated-softmax vs inverted target (forward KL)
+    # DEPRECATED (kept importable for reproducibility; see docs/LOSSES.md "Diagnosis verdicts"):
+    # ockl/socce are fully weight-swept and never beat KL -- their optimum is w->0.
+    "ockl":          (ockl_term,          0.0),  # DEPRECATED negated-softmax vs inverted target (forward KL)
     "ockl_logitneg": (ockl_logitneg_term, 0.0),  # negate teacher logits (not probabilities); shares KL's minimum
     "gce":           (gce_term,           0.0),  # noise-tolerant CE<->MAE interpolant (q via --gce-q)
     "rce":           (rce_term,           0.0),  # reverse CE; compose with kl for SCE (log floor via --sce-log-floor)
     "scce":          (scce_term,          0.0),  # soft complementary CE; rejection-side V-information estimator
-    "socce":         (socce_term,         0.0),  # soft one-cold CE on cutmix hard labels, raw student logits (no T)
+    "socce":         (socce_term,         0.0),  # DEPRECATED soft one-cold CE on cutmix hard labels, raw logits
     "mxce":          (mxce_term,          0.0),  # mix-aware KL: target = lam*p_T(host) + (1-lam)*p_T(partner)
 }
 

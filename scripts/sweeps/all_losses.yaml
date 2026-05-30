@@ -18,7 +18,7 @@
 
 defaults:
   seed: [42, 43, 44]
-  ipc: [10]
+  ipc: [1, 10, 50]
   weights:
     - {kl: 1.0}
     - {kl: 1.0, ockl: 1.0}

@@ -55,6 +55,7 @@ SCALAR_FLAG_KEYS = [
     ("num_crop",   "--num-crop"),
     ("mipc",       "--mipc"),
     ("monitor",    "--monitor"),
+    ("gce_q",      "--gce-q"),
 ]
 BOOL_FLAG_KEYS = [
     ("skip_synth", "--skip-synth"),

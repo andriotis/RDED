@@ -1,0 +1,72 @@
+# Tier-2 confirmatory weight sweep (see docs/LOSSES.md + the plan).
+#
+# Rationale: the single-weight losses were only ever run at w=1.0 (gce also only
+# at q=0.7), so "hurts/ties at w=1.0" is NOT a verdict. Sweep weight (and q for
+# gce) before any keep/deprecate call. ockl and socce are NOT here -- they are
+# already weight-swept and deprecated (best Δ ≈ 0 at w->0; never beat KL).
+#
+# Scope: cifar100/conv3, ipc=10 (lowest-variance, signal-rich cell), 3 seeds.
+# Promote any arm reaching >= KL - 0.3pp to an ipc=50 + resnet18_modified confirm.
+#
+# Analyse with:  python tools/diagnose_losses.py
+#   (gce_q variants are recorded per-row and shown as q<val> in the table.)
+#
+# Run: python scripts/run_sweep.py scripts/sweeps/confirm_weights.yaml [--resume] [--dry-run]
+#
+# Cells: 3 (baseline) + 12 (rce) + 36 (gce wxq) + 9 (scce) + 9 (ockl_logitneg)
+#        + 6 (mxce) = 75 runs.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: 10
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+
+experiments:
+  - name: baseline
+    dataset: cifar100
+    arch: conv3
+    weights:
+      - {kl: 1.0}                       # anchor (within-sweep KL reference)
+
+  - name: rce_wsweep
+    dataset: cifar100
+    arch: conv3
+    weights:                            # SCE = kl + beta*rce; beta normally < CE term
+      - {kl: 1.0, rce: 0.05}
+      - {kl: 1.0, rce: 0.1}
+      - {kl: 1.0, rce: 0.3}
+      - {kl: 1.0, rce: 1.0}
+
+  - name: gce_wq_sweep
+    dataset: cifar100
+    arch: conv3
+    weights:
+      kl: 1.0
+      gce: [0.3, 0.5, 1.0]             # dict-shape: cartesian over the gce list ...
+    gce_q: [0.3, 0.5, 0.7, 0.9]        # ... crossed with q (only set in the gce block)
+
+  - name: scce_wsweep
+    dataset: cifar100
+    arch: conv3
+    weights:                            # already a tie at w=1.0; test if it ever wins
+      - {kl: 1.0, scce: 0.3}
+      - {kl: 1.0, scce: 1.0}
+      - {kl: 1.0, scce: 3.0}
+
+  - name: ockl_logitneg_wsweep
+    dataset: cifar100
+    arch: conv3
+    weights:                            # shares KL's optimum by design -> expect tie
+      - {kl: 1.0, ockl_logitneg: 0.3}
+      - {kl: 1.0, ockl_logitneg: 1.0}
+      - {kl: 1.0, ockl_logitneg: 3.0}
+
+  - name: mxce_lowweight
+    dataset: cifar100
+    arch: conv3
+    weights:                            # target-swap fights patch-composed images;
+      - {kl: 1.0, mxce: 0.1}            # one low-weight check only, low expected value
+      - {kl: 1.0, mxce: 0.3}

@@ -18,6 +18,7 @@
 #   --mipc <int>                         default: 300
 #   --monitor <csv>                      comma-separated loss-term names to log under no_grad
 #                                          (passed through to main.py; default empty)
+#   --gce-q <float>                      q for the GCE term (default 0.7; recorded + keyed when gce active)
 #   --skip-synth                         pass --skip-synth to main.py (paired protocol)
 #   --resume                             skip if a matching row is already in logs/results.jsonl
 #   --dry-run                            print the python command, don't execute
@@ -36,6 +37,7 @@ FACTOR=1
 NUM_CROP=5
 MIPC=300
 MONITOR=""
+GCE_Q=""
 SKIP_SYNTH=0
 RESUME=0
 DRY_RUN=0
@@ -45,7 +47,7 @@ WEIGHTS_ARGS=()        # --w-<name> <val> pairs, verbatim passthrough to main.py
 USER_WEIGHTS_JSON="{}"  # collected user-set weights as JSON, used by resume key and log filename
 
 usage() {
-  sed -n '2,24p' "$0"
+  sed -n '2,25p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --num-crop)   shift; NUM_CROP="$1"; shift ;;
     --mipc)       shift; MIPC="$1"; shift ;;
     --monitor)    shift; MONITOR="$1"; shift ;;
+    --gce-q)      shift; GCE_Q="$1"; shift ;;
     --skip-synth) SKIP_SYNTH=1; shift ;;
     --resume)     RESUME=1; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
@@ -121,28 +124,44 @@ mkdir -p logs/runs
 
 # Resolve canonical weights = LOSS_REGISTRY defaults overridden by user-set values.
 # WEIGHTS_TAG is a stable filename slug (e.g. "kl1p0_ockl0p3") of nonzero weights.
-read -r WEIGHTS_TAG CANON_JSON < <(USER_JSON="$USER_WEIGHTS_JSON" python - <<'PY'
+# EXTRA_TAG slugs the non-weight hyperparams that distinguish a cell (gce_q when
+# gce is active and != default). "-" means "no extras" (keeps field count).
+read -r WEIGHTS_TAG EXTRA_TAG CANON_JSON < <(USER_JSON="$USER_WEIGHTS_JSON" GCE_Q="$GCE_Q" python - <<'PY'
 import json, os
 from validation.losses import LOSS_REGISTRY
 user = json.loads(os.environ["USER_JSON"])
 canon = {name: float(user.get(name, default)) for name, (_, default) in LOSS_REGISTRY.items()}
-# tag from nonzero entries, sorted by name
 nz = sorted((n, w) for n, w in canon.items() if w > 0)
 def slug(w):
     return f"{w:g}".replace(".", "p").replace("-", "neg")
 tag = "_".join(f"{n}{slug(w)}" for n, w in nz) or "noloss"
-print(tag, json.dumps(canon, sort_keys=True))
+extras = []
+gce_q = os.environ.get("GCE_Q", "")
+if canon.get("gce", 0) > 0 and gce_q and float(gce_q) != 0.7:
+    extras.append("q" + slug(float(gce_q)))
+print(tag, ("_".join(extras) or "-"), json.dumps(canon, sort_keys=True))
 PY
 )
 
 if [[ $RESUME -eq 1 && -f logs/results.jsonl ]]; then
-  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" python - <<'PY'
+  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" GCE_Q="$GCE_Q" python - <<'PY'
 import json, os
 canon = json.loads(os.environ["CANON_JSON"])
+
+def extras(weights, gce_q):
+    """Non-weight hyperparams that distinguish a cell. Empty -> matches legacy
+    rows (which never set these), so backward-compatible."""
+    items = []
+    if float(weights.get("gce", 0)) > 0 and gce_q is not None and float(gce_q) != 0.7:
+        items.append(("gce_q", float(gce_q)))
+    return tuple(items)
+
+new_q = os.environ.get("GCE_Q") or None
 key = (
     os.environ["DATASET"], os.environ["ARCH"], os.environ["STUD"],
     int(os.environ["IPC"]), int(os.environ["SEED"]),
     tuple(sorted(canon.items())),
+    extras(canon, new_q),
 )
 with open("logs/results.jsonl") as f:
     for line in f:
@@ -162,6 +181,7 @@ with open("logs/results.jsonl") as f:
             r.get("dataset"), r.get("arch"), r.get("stud"),
             r.get("ipc"), r.get("seed"),
             tuple(sorted((k, float(v)) for k, v in w.items())),
+            extras(w, r.get("gce_q")),
         )
         if rk == key:
             print("MATCH")
@@ -174,9 +194,12 @@ PY
   fi
 fi
 
-log="logs/runs/${DATASET}_${ARCH}_to_${STUD_ARCH}_ipc${IPC}_seed${SEED}_w${WEIGHTS_TAG}.log"
+# Fold the extras slug into filename + run tag so gce_q variants don't collide.
+EXTRA_SLUG=""
+[[ "$EXTRA_TAG" != "-" ]] && EXTRA_SLUG="_${EXTRA_TAG}"
+log="logs/runs/${DATASET}_${ARCH}_to_${STUD_ARCH}_ipc${IPC}_seed${SEED}_w${WEIGHTS_TAG}${EXTRA_SLUG}.log"
 
-RUN_TAG="seed${SEED}_w${WEIGHTS_TAG}"
+RUN_TAG="seed${SEED}_w${WEIGHTS_TAG}${EXTRA_SLUG}"
 
 py_args=(
   --subset       "$DATASET"
@@ -201,6 +224,9 @@ if [[ ${#WEIGHTS_ARGS[@]} -gt 0 ]]; then
 fi
 if [[ -n "$MONITOR" ]]; then
   py_args+=(--monitor "$MONITOR")
+fi
+if [[ -n "$GCE_Q" ]]; then
+  py_args+=(--gce-q "$GCE_Q")
 fi
 [[ $SKIP_SYNTH -eq 1 ]] && py_args+=(--skip-synth)
 
