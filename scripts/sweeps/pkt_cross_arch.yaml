@@ -1,0 +1,46 @@
+# PKT cross-architecture -- distill with one arch, train a student of another.
+#
+# This is PKT's strongest theoretical claim (dimensionality-agnostic geometry
+# transfer) landing on RDED's documented weak spot (cross-arch, RDED Table 4).
+# Mirrors scripts/sweeps/cross_arch.yaml exactly, with pkt swapped in for ockl.
+#
+# IMPORTANT: pkt:3.0 is the best-so-far placeholder; swap for the
+# pkt_weight_opt.yaml winner before launching.
+#
+# Analyse with: python tools/diagnose_losses.py --dataset <ds> --arch <arch> --stud <stud>
+# Run: python scripts/run_sweep.py scripts/sweeps/pkt_cross_arch.yaml [--resume] [--dry-run]
+#
+# 4 directional pairs x 3 ipc x 2 weight configs x 3 seeds = 72 cells
+# (run --dry-run for the live count).
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1]
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  weights:
+    - {kl: 1.0}
+    - {kl: 1.0, pkt: 31.0}        # <- swap 3.0 for the pkt_weight_opt winner
+
+experiments:
+  - name: cifar100_conv3_to_resnet18
+    dataset: cifar100
+    arch: conv3
+    stud_arch: resnet18_modified
+
+  - name: cifar100_resnet18_to_conv3
+    dataset: cifar100
+    arch: resnet18_modified
+    stud_arch: conv3
+
+  - name: tinyimagenet_conv4_to_resnet18
+    dataset: tinyimagenet
+    arch: conv4
+    stud_arch: resnet18_modified
+
+  - name: tinyimagenet_resnet18_to_conv4
+    dataset: tinyimagenet
+    arch: resnet18_modified
+    stud_arch: conv4

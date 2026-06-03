@@ -19,11 +19,17 @@ import torch.nn.functional as F
 
 MixInfo = collections.namedtuple(
     "MixInfo",
-    "labels rand_index lam num_classes teacher_logits_unmixed",
+    "labels rand_index lam num_classes teacher_logits_unmixed "
+    "teacher_feats_mixed student_feats_mixed",
 )
-# teacher_logits_unmixed is optional: only populated when a term that needs the
-# teacher's prediction on the original un-mixed images is active (currently mxce).
-MixInfo.__new__.__defaults__ = (None,)
+# The trailing three fields are optional, each populated only when an active
+# term needs it (gated in main.py), so stock-KL runs pay for none of them:
+#   - teacher_logits_unmixed: teacher prediction on the original un-mixed images
+#     (currently mxce; see TERMS_NEEDING_UNMIXED_TEACHER).
+#   - teacher_feats_mixed / student_feats_mixed: penultimate-layer features on the
+#     MIXED images, for relational (feature-space) terms (pkt/spkt; see
+#     TERMS_NEEDING_FEATURES). student_feats_mixed keeps grad; teacher is detached.
+MixInfo.__new__.__defaults__ = (None, None, None)
 
 
 def kl_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
@@ -186,6 +192,70 @@ def socce_term(student_logits_mixed, teacher_logits_mixed, temperature, args=Non
     return per_sample.mean()
 
 
+_PKT_EPS = 1e-7
+
+
+def _cosine_cond_prob(feats):
+    """Per-sample conditional probability matrix from PKT's cosine-similarity kernel.
+
+    Following Passalis & Tefas (ECCV 2018): K(a,b) = (cos(a,b)+1)/2 in [0,1], then
+    row-normalize to a conditional distribution P[i,j] = K(x_i,x_j)/sum_k K(x_i,x_k).
+    The diagonal (self-similarity = 1) is KEPT in the normalization to match the
+    authors' released implementation (the paper text sums over k!=j; the released
+    code does not, and produced the reported numbers -- see docs/LOSSES.md).
+
+    feats: [B, D] (any trailing dims are flattened). Returns [B, B] rows summing to 1.
+    """
+    z = F.normalize(feats.flatten(1), p=2, dim=1)
+    sim = (z @ z.t() + 1.0) / 2.0
+    return sim / sim.sum(dim=1, keepdim=True).clamp_min(_PKT_EPS)
+
+
+def pkt_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Probabilistic Knowledge Transfer on penultimate features (relational KD).
+
+    Matches the *geometry* of the teacher's feature space rather than its output:
+      P = cosine conditional probs of teacher feats on the mixed image
+      Q = cosine conditional probs of student feats on the mixed image
+      L_PKT = mean_i KL(P_i || Q_i) = mean_i sum_j P_ij (log P_ij - log Q_ij)
+    No temperature (cosine kernel needs no bandwidth/T tuning). Gradients flow to
+    the student features only -- the teacher feats are detached upstream. Requires
+    mix_info.{student,teacher}_feats_mixed (main.py captures them when --w-pkt > 0).
+    """
+    if mix_info is None or mix_info.student_feats_mixed is None or mix_info.teacher_feats_mixed is None:
+        raise ValueError(
+            "pkt_term requires mix_info.student_feats_mixed and teacher_feats_mixed; "
+            "main.py must capture penultimate features when --w-pkt > 0"
+        )
+    p = _cosine_cond_prob(mix_info.teacher_feats_mixed)
+    q = _cosine_cond_prob(mix_info.student_feats_mixed)
+    return (p * (torch.log(p + _PKT_EPS) - torch.log(q + _PKT_EPS))).sum(dim=1).mean()
+
+
+def spkt_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None):
+    """Supervised PKT (S-PKT): same student feature geometry, but the relational
+    target is the *class structure* instead of the teacher's feature space.
+
+      A_ij    = 1 if label_i == label_j else 0          (host hard labels)
+      P_ij    = A_ij / sum_k A_ik                        (row-normalized affinity)
+      Q       = cosine conditional probs of student feats on the mixed image
+      L_sPKT  = mean_i KL(P_i || Q_i)
+
+    Pulls same-class samples together / pushes different-class apart directly in
+    feature space -- a relational neural-collapse target (cf. NC1/NC3). Uses the
+    host label (mix_info.labels) under cutmix, like socce_term; the lambda-weighted
+    soft-affinity form is left as a documented ablation. Different-class entries
+    have P_ij = 0 and contribute nothing (0 * log 0 := 0).
+    """
+    if mix_info is None or mix_info.student_feats_mixed is None or mix_info.labels is None:
+        raise ValueError("spkt_term requires mix_info.student_feats_mixed and labels")
+    labels = mix_info.labels.view(-1)
+    same = (labels.unsqueeze(0) == labels.unsqueeze(1)).to(mix_info.student_feats_mixed.dtype)
+    p = same / same.sum(dim=1, keepdim=True).clamp_min(_PKT_EPS)
+    q = _cosine_cond_prob(mix_info.student_feats_mixed)
+    return (p * (torch.log(p + _PKT_EPS) - torch.log(q + _PKT_EPS))).sum(dim=1).mean()
+
+
 # Single source of truth for student-loss terms available to validation/main.py.
 # To add a new loss "A":
 #   1. Implement `def A_term(student_logits_mixed, teacher_logits_mixed, temperature, args=None, mix_info=None)`
@@ -204,7 +274,13 @@ LOSS_REGISTRY = {
     "scce":          (scce_term,          0.0),  # soft complementary CE; rejection-side V-information estimator
     "socce":         (socce_term,         0.0),  # DEPRECATED soft one-cold CE on cutmix hard labels, raw logits
     "mxce":          (mxce_term,          0.0),  # mix-aware KL: target = lam*p_T(host) + (1-lam)*p_T(partner)
+    "pkt":           (pkt_term,           0.0),  # PKT: match teacher penultimate-feature geometry (cosine-kernel relational KD)
+    "spkt":          (spkt_term,          0.0),  # supervised PKT: same-class relational target (feature-space neural-collapse loss)
 }
 
 # Terms that require teacher_logits on the un-mixed images (populated by main.py).
 TERMS_NEEDING_UNMIXED_TEACHER = frozenset({"mxce"})
+
+# Terms that operate on penultimate FEATURES (not logits) and therefore need
+# main.py to capture student/teacher features on the mixed images.
+TERMS_NEEDING_FEATURES = frozenset({"pkt", "spkt"})

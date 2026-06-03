@@ -34,7 +34,12 @@ from validation.utils import (
     seed_everything,
     make_loader_kwargs,
 )
-from validation.losses import LOSS_REGISTRY, MixInfo, TERMS_NEEDING_UNMIXED_TEACHER
+from validation.losses import (
+    LOSS_REGISTRY,
+    MixInfo,
+    TERMS_NEEDING_UNMIXED_TEACHER,
+    TERMS_NEEDING_FEATURES,
+)
 from validation.nc_metrics import compute_nc_metrics
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
@@ -49,6 +54,26 @@ def _find_last_linear(model):
         if isinstance(m, nn.Linear):
             last = m
     return last
+
+
+def forward_capture_feats(model, x, fc):
+    """Run `model(x)` while capturing the input to the last Linear (= penultimate
+    features) for this single forward.
+
+    Same hook mechanism as the NC capture in validate(), but it returns the live
+    tensor WITHOUT detaching, so when called under grad (the student's mixed-image
+    pass) gradients flow through the captured features into the loss. The hook is
+    scoped to one forward, so it never picks up the separate accuracy-only pass.
+    """
+    feats = {}
+    handle = fc.register_forward_hook(
+        lambda module, inp, out: feats.__setitem__("f", inp[0])
+    )
+    try:
+        out = model(x)
+    finally:
+        handle.remove()
+    return out, feats["f"]
 
 
 def main(args):
@@ -252,6 +277,14 @@ def train(epoch, train_loader, teacher_model, student_model, args):
     needs_unmixed_teacher = (
         {n for n, _, _ in active_terms} | {n for n, _ in monitor_terms}
     ) & TERMS_NEEDING_UNMIXED_TEACHER
+    # Gate penultimate-feature capture to relational terms (pkt/spkt). When no
+    # feature term is active, the forwards below stay identical to stock RDED.
+    needs_features = bool(
+        ({n for n, _, _ in active_terms} | {n for n, _ in monitor_terms})
+        & TERMS_NEEDING_FEATURES
+    )
+    fc_student = _find_last_linear(student_model) if needs_features else None
+    fc_teacher = _find_last_linear(teacher_model) if needs_features else None
 
     teacher_model.eval()
     student_model.train()
@@ -263,23 +296,42 @@ def train(epoch, train_loader, teacher_model, student_model, args):
 
             mix_images, rand_index, lam, _ = mix_aug(images, args)
             teacher_logits_unmixed = teacher_model(images) if needs_unmixed_teacher else None
-            mix_info = MixInfo(
-                labels=labels,
-                rand_index=rand_index,
-                lam=lam if lam is not None else 1.0,
-                num_classes=args.nclass,
-                teacher_logits_unmixed=teacher_logits_unmixed,
-            )
 
             pred_label = student_model(images)
-            teacher_logits = teacher_model(mix_images)
+            if needs_features:
+                teacher_logits, teacher_feats_mixed = forward_capture_feats(
+                    teacher_model, mix_images, fc_teacher
+                )
+            else:
+                teacher_logits = teacher_model(mix_images)
+                teacher_feats_mixed = None
 
         if batch_idx % args.re_accum_steps == 0:
             optimizer.zero_grad()
 
         prec1, prec5 = accuracy(pred_label, labels, topk=(1, 5))
 
-        pred_mix_label = student_model(mix_images)
+        # Student forward on the mixed image (under grad). Capture penultimate
+        # features for relational terms; the captured tensor keeps its graph.
+        if needs_features:
+            pred_mix_label, student_feats_mixed = forward_capture_feats(
+                student_model, mix_images, fc_student
+            )
+        else:
+            pred_mix_label = student_model(mix_images)
+            student_feats_mixed = None
+
+        # Built after the student pass so it can carry student_feats_mixed; only
+        # consumed by the loss terms below, so the later construction is harmless.
+        mix_info = MixInfo(
+            labels=labels,
+            rand_index=rand_index,
+            lam=lam if lam is not None else 1.0,
+            num_classes=args.nclass,
+            teacher_logits_unmixed=teacher_logits_unmixed,
+            teacher_feats_mixed=teacher_feats_mixed,
+            student_feats_mixed=student_feats_mixed,
+        )
 
         # Composite student loss = sum_i w_i * term_i(student, teacher, T).
         # All terms share args.temperature.

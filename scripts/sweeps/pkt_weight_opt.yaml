@@ -1,0 +1,30 @@
+# PKT weight optimum -- locate the best --w-pkt at the signal-rich pilot cell.
+#
+# Why: in scripts/sweeps/pkt_spkt.yaml, pkt beat KL monotonically and was STILL
+# RISING at the top weight tested (cifar100/conv3/ipc10: pkt0.3 +0.31, pkt1 +0.69,
+# pkt3 +1.36 pp vs KL 48.55 +/-0.21). The optimum is above 3 -- extend upward here.
+#
+# w=3 is repeated as a within-file bridge to the prior sweep (same protocol: no
+# skip_synth, re-synth per cell). Analyse with: python tools/diagnose_losses.py
+# Run: python scripts/run_sweep.py scripts/sweeps/pkt_weight_opt.yaml [--resume] [--dry-run]
+#
+# ~5 weight configs x 3 seeds = 15 cells (run --dry-run for the live count).
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [10]               # lowest-variance pilot cell (matches confirm_weights.yaml)
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  weights:
+    - {kl: 1.0}                  # anchor
+    - {kl: 1.0, pkt: 18}        # bridge to the prior sweep
+    - {kl: 1.0, pkt: 22}        # bridge to the prior sweep
+    - {kl: 1.0, pkt: 31}       # bridge to the prior sweep
+    - {kl: 1.0, pkt: 37}       # bridge to the prior sweep
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3

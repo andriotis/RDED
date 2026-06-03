@@ -1,0 +1,58 @@
+# PKT x RDED -- feature-relational distillation weight-aware diagnosis (low-IPC focus).
+#
+# Two new terms (validation/losses.py):
+#   pkt  -- Probabilistic Knowledge Transfer: match the teacher's penultimate
+#           FEATURE geometry over batch sample-pairs (cosine-kernel relational KD).
+#   spkt -- Supervised PKT: same student side, target = same-class affinity
+#           (a feature-space neural-collapse loss). See docs/LOSSES.md secs 9-10.
+#
+# Both are AUXILIARY to KL: they shape features but give the classifier head no
+# label signal on their own, so every cell keeps kl:1.0. (pkt-alone / spkt-alone
+# would not train the logit head -> near-random top1; deliberately not swept.)
+#
+# Methodology (project rule): a single weight is NOT a verdict. Sweep the weight
+# geometrically against the KL anchor; only then call keep/deprecate. Objective is
+# top1; NC1-4 are logged as diagnostics (auto-computed at validation).
+#
+# Analyse with:  python tools/diagnose_losses.py
+# Run:           python scripts/run_sweep.py scripts/sweeps/pkt_spkt.yaml [--resume] [--dry-run]
+#
+# Pilot (run first): cifar100_conv3, 11 weight configs x (ipc list) x 3 seeds. Run
+#   with --dry-run for the live cell count. Promote any arm reaching >= KL - 0.3pp
+#   to wider ipc and the tinyimagenet block.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [10]              # low-IPC focus; edit this list (e.g. [1, 10, 50]) to widen
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  weights:
+    - {kl: 1.0}                          # anchor (within-sweep KL reference)
+    - {kl: 1.0, pkt: 0.1}                # PKT weight sweep
+    - {kl: 1.0, pkt: 0.3}
+    - {kl: 1.0, pkt: 1.0}
+    - {kl: 1.0, pkt: 3.0}
+    - {kl: 1.0, spkt: 0.1}               # supervised-PKT weight sweep
+    - {kl: 1.0, spkt: 0.3}
+    - {kl: 1.0, spkt: 1.0}
+    - {kl: 1.0, spkt: 3.0}
+    - {kl: 1.0, pkt: 0.3, spkt: 0.3}     # combined (geometry + class structure)
+    - {kl: 1.0, pkt: 1.0, spkt: 1.0}
+
+experiments:
+  - name: cifar100_conv3                 # pilot: signal-rich, lowest-variance
+    dataset: cifar100
+    arch: conv3
+    # No skip_synth: re-synthesize per cell (matches baselines.yaml). Synthesis is
+    # seeded, so each seed draws its own distilled set -> the seed band includes
+    # synthesis variance and these rows are directly comparable to the existing KL
+    # baselines. (Synth is recomputed once per weight cell too -- redundant but
+    # deterministic per seed; inherent to the no-skip-synth protocol.)
+
+  # Promotion block -- uncomment after the pilot identifies surviving weights,
+  # and trim `weights` in defaults to the survivors to keep the matrix tractable.
+  # - name: tinyimagenet_conv4
+  #   dataset: tinyimagenet
+  #   arch: conv4

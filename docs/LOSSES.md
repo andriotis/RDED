@@ -21,6 +21,11 @@ CutMix/MixUp metadata (in `MixInfo`): $\lambda$ (`lam`) is the mixing weight of
 the host image, $y_i$ the host hard label, $y_{\text{partner}(i)}$ the partner
 hard label (`rand_index`).
 
+Feature-relational terms (`pkt`, `spkt`) additionally use the **penultimate-layer
+features** on the mixed image: $h^S_i$ (student) and $h^T_i$ (teacher), shapes
+$[B, D_S]$ and $[B, D_T]$. They operate on *pairs of samples in a batch* (not on
+classes), need no matching feature dimensionality, and use **no temperature**.
+
 ---
 
 ## 1. `kl` — standard KD (stock RDED)
@@ -151,6 +156,61 @@ With no mixing it reduces to the one-hot one-cold encoding from the OCCE paper.
 
 ---
 
+## 9. `pkt` — Probabilistic Knowledge Transfer (feature-space relational KD)
+
+Cosine-similarity kernel, then row-normalized conditional probabilities, on
+**penultimate features** (Passalis & Tefas, ECCV 2018):
+
+$$
+K(a,b) = \tfrac{1}{2}\!\left(\frac{a^\top b}{\|a\|_2\,\|b\|_2} + 1\right) \in [0,1], \qquad
+P^T_{ij} = \frac{K(h^T_i, h^T_j)}{\sum_k K(h^T_i, h^T_k)}, \quad
+Q^S_{ij} = \frac{K(h^S_i, h^S_j)}{\sum_k K(h^S_i, h^S_k)}
+$$
+
+$$
+L_{\mathrm{PKT}} = \frac{1}{B}\sum_i \operatorname{KL}\!\left(P^T_i \,\|\, Q^S_i\right)
+$$
+
+Matches the **geometry** of the teacher's feature space (which samples are near
+which) rather than the teacher's output — the signal `kl` throws away. Proven to
+preserve the **Quadratic Mutual Information** between features and labels; needs no
+temperature/bandwidth and no matching dimensionality. Gradients flow to the student
+features only (teacher detached).
+
+> **Diagonal convention.** The paper text normalizes over $k \ne j$ (excludes
+> self-similarity); the authors' released code keeps the diagonal ($K(h_i,h_i)=1$).
+> We follow the **released code** (it produced the paper's numbers) — see
+> `_cosine_cond_prob` in `validation/losses.py`.
+
+> **Mix-aware PKT (planned ablation, not yet implemented).** `pkt` matches teacher
+> and student geometry both on the *mixed* image. The mix-aware variant would build
+> the teacher relational target from the *un-mixed* features (analogous to how
+> `mxce` mixes un-mixed teacher logits), answering whether relational structure is
+> better matched pre- or post-mix. The `MixInfo` plumbing leaves room for a
+> `teacher_feats_unmixed` field when this lands.
+
+---
+
+## 10. `spkt` — Supervised PKT (feature-space class structure)
+
+Same student side as `pkt`, but the relational target is the **class structure**
+instead of the teacher's geometry:
+
+$$
+A_{ij} = \mathbf{1}[\,y_i = y_j\,], \qquad
+P_{ij} = \frac{A_{ij}}{\sum_k A_{ik}}, \qquad
+L_{\mathrm{sPKT}} = \frac{1}{B}\sum_i \operatorname{KL}\!\left(P_i \,\|\, Q^S_i\right)
+$$
+
+Pulls same-class samples together and pushes different-class apart **directly in
+feature space** — a *relational* neural-collapse target (within-class collapse +
+between-class separation, cf. NC1/NC3). Uses the host hard label $y_i$ under cutmix
+(like `socce`); the $\lambda$-weighted soft-affinity form is a further ablation. Note
+this differs from the deprecated logit-space anti-class terms (`ockl`, `socce`): it
+shapes the *features*, where neural collapse actually lives, rather than the logits.
+
+---
+
 ## Diagnosis verdicts (cifar100/conv3, weight-aware; see `tools/diagnose_losses.py`)
 
 Reproduce with `python tools/diagnose_losses.py`. A single `w=1.0` point is **not**
@@ -163,6 +223,7 @@ tested* stays inside KL's seed-noise band.
 | `ockl` | **DEPRECATED** | 6-weight sweep ×3 ipc; best Δ ≈ 0 at w→0, monotone harm above w≈0.1 |
 | `socce` | **DEPRECATED** | 8-weight sweep ×3 ipc ×2 arch; only the no-op 1e-5 is safe; NC2 worsens |
 | `rce`, `gce`, `scce`, `ockl_logitneg`, `mxce` | **sweep-first** | only run at w=1.0 (gce also only q=0.7) → confirmatory grid in `scripts/sweeps/confirm_weights.yaml` before any verdict |
+| `pkt`, `spkt` | **new, sweep-first** | feature-relational terms; weight-sweep against KL (low IPC first) before any keep/deprecate verdict |
 
 Deprecated terms stay importable (negative results must stay reproducible) and are
 excluded from the active sweeps.
@@ -181,8 +242,11 @@ excluded from the active sweeps.
 | `rce`           | $p^T$ (clamped, log argument)                                 | teacher              | $\operatorname{softmax}(z^S/T)$ as weight | yes    |
 | `scce`          | $1 - p^T$ (rejection weights)                                 | teacher (rejection)  | $\log(1 - \operatorname{softmax}(z^S/T))$ | yes    |
 | `socce`         | $(1 - y^{\text{mix}})/(N-1)$                                  | hard cutmix labels   | $\operatorname{softmax}(-z^S)$          | **no**   |
+| `pkt`           | $P^T$ (teacher-feature cosine cond-prob)                      | teacher (feature geometry) | cosine cond-prob of $h^S$         | **no**   |
+| `spkt`          | $A/\!\sum A$ (same-class affinity, row-norm)                  | hard labels (feature space) | cosine cond-prob of $h^S$        | **no**   |
 
 **Families:**
 - *Standard / mix-aware KD*: `kl`, `mxce` — match the teacher's confident classes.
 - *Anti-class / one-cold (logit space, DEPRECATED)*: `ockl`, `socce` — never beat KL (see verdicts); `ockl_logitneg` shares KL's minimum.
 - *Robust soft-label CE*: `gce`, `rce`, `scce` — noise-tolerant or rejection-side reformulations of CE.
+- *Feature-relational (PKT)*: `pkt`, `spkt` — match the **geometry** of the teacher's feature space (`pkt`) or the class structure (`spkt`) over batch sample-pairs, instead of per-sample logits. The only terms that read penultimate features.

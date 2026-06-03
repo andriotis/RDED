@@ -1,0 +1,43 @@
+# PKT breadth -- does the ipc10/conv3 win hold across IPC, dataset, and depth?
+#
+# Same-arch (teacher == student), no skip_synth (re-synth per cell, baseline-
+# comparable). The thesis headline is LOW IPC: run the ipc=1 rows first (edit the
+# ipc list to [1]) before committing to the full grid.
+#
+# IMPORTANT: pkt:3.0 below is the best-so-far placeholder. After
+# scripts/sweeps/pkt_weight_opt.yaml identifies the optimum, swap 3.0 -> winner.
+#
+# Analyse with: python tools/diagnose_losses.py --dataset <ds> --arch <arch>
+# Run: python scripts/run_sweep.py scripts/sweeps/pkt_breadth.yaml [--resume] [--dry-run]
+#
+# Full grid: 4 (dataset,arch) x 3 ipc x 2 weight configs x 3 seeds = 72 cells.
+# (cifar100/conv3/ipc10 is already done in pkt_spkt.yaml; --resume skips logged cells.)
+# Run --dry-run for the live count after any edit.
+
+defaults:
+  seed: [42, 43, 44]
+  ipc: [1]         # headline is ipc=1; trim to [1] for the first pass
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  weights:
+    - {kl: 1.0}                  # per-cell KL anchor (paired delta)
+    - {kl: 1.0, pkt: 31.0}        # <- swap 3.0 for the pkt_weight_opt winner
+
+experiments:
+  - name: cifar100_conv3
+    dataset: cifar100
+    arch: conv3
+
+  - name: cifar100_resnet18
+    dataset: cifar100
+    arch: resnet18_modified
+
+  - name: tinyimagenet_conv4
+    dataset: tinyimagenet
+    arch: conv4
+
+  - name: tinyimagenet_resnet18
+    dataset: tinyimagenet
+    arch: resnet18_modified
