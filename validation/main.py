@@ -33,6 +33,9 @@ from validation.utils import (
     get_parameters,
     seed_everything,
     make_loader_kwargs,
+    eval_transform,
+    IMAGENET_NORM,
+    _find_last_linear,
 )
 from validation.losses import (
     LOSS_REGISTRY,
@@ -41,19 +44,9 @@ from validation.losses import (
     TERMS_NEEDING_FEATURES,
 )
 from validation.nc_metrics import compute_nc_metrics
+from validation.diagnostics import build_svhn_ood_loader, run_diagnostics
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
-
-
-def _find_last_linear(model):
-    """Return the last nn.Linear module in `model` (unwraps DataParallel)."""
-    if isinstance(model, nn.DataParallel):
-        model = model.module
-    last = None
-    for m in model.modules():
-        if isinstance(m, nn.Linear):
-            last = m
-    return last
 
 
 def forward_capture_feats(model, x, fc):
@@ -139,9 +132,7 @@ def main_worker(args):
         )
 
     print("process data from {}".format(args.syn_data_path))
-    normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-    )
+    normalize = IMAGENET_NORM
 
     augment = []
     augment.append(transforms.ToTensor())
@@ -180,14 +171,7 @@ def main_worker(args):
             ipc=args.val_ipc,
             mem=True,
             root=args.val_dir,
-            transform=transforms.Compose(
-                [
-                    transforms.Resize(args.input_size // 7 * 8, antialias=True),
-                    transforms.CenterCrop(args.input_size),
-                    transforms.ToTensor(),
-                    normalize,
-                ]
-            ),
+            transform=eval_transform(args.input_size),
         ),
         batch_size=args.re_batch_size,
         shuffle=False,
@@ -233,7 +217,25 @@ def main_worker(args):
         print(f"Train Finish! Best accuracy is {best_acc1}@{best_epoch}")
         if last_nc is not None:
             print(f"Final NC metrics: {last_nc}")
-        results_path = log_run(args, best_top1=best_acc1, final_top1=last_top1, nc_metrics=last_nc)
+
+        # Optional trustworthiness panel (NC + calibration + open-set) on the
+        # trained student. Purely additive: does not touch the training above.
+        diagnostics = None
+        if getattr(args, "diagnostics", False):
+            print("=> running diagnostics (ECE / OSCR / AUROC / FPR95 / NC) ...")
+            ood_loader = build_svhn_ood_loader(args)
+            diagnostics = run_diagnostics(
+                student_model, args.val_loader, ood_loader, args.nclass
+            )
+            print(f"Diagnostics: {diagnostics}")
+
+        results_path = log_run(
+            args,
+            best_top1=best_acc1,
+            final_top1=last_top1,
+            nc_metrics=last_nc,
+            diagnostics=diagnostics,
+        )
         print(f"Logged run to {results_path}")
         tracker.log_hparams(args, best_top1=best_acc1, final_top1=last_top1)
     finally:

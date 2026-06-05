@@ -18,8 +18,13 @@ import time
 from validation.losses import LOSS_REGISTRY
 
 
-def log_run(args, best_top1, final_top1, nc_metrics):
-    """Append one run's result to args.results_file (default: ./logs/results.jsonl)."""
+def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None):
+    """Append one run's result to args.results_file (default: ./logs/results.jsonl).
+
+    `diagnostics` (optional): the dict from validation.diagnostics.run_diagnostics
+    (ECE / OSCR / AUROC / FPR95 / NC). Stored nested under "diag" so it never
+    collides with the flat columns; None when --diagnostics is off.
+    """
     path = getattr(args, "results_file", None) or os.path.join("logs", "results.jsonl")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
@@ -42,6 +47,7 @@ def log_run(args, best_top1, final_top1, nc_metrics):
         "nc2": None if nc_metrics is None else nc_metrics.get("nc2"),
         "nc3": None if nc_metrics is None else nc_metrics.get("nc3"),
         "nc4": None if nc_metrics is None else nc_metrics.get("nc4"),
+        "diag": diagnostics,
         "exp_name": args.exp_name,
     }
     with open(path, "a") as f:

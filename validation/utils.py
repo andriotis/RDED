@@ -3,13 +3,54 @@ import numpy as np
 import os
 import torch.distributed
 import torch.multiprocessing
+import torch.nn as nn
 import torchvision
+import torchvision.transforms as transforms
 from torchvision.transforms import functional as t_F
 import torch.nn.functional as F
 import random
 
 
 _SHARING_STRATEGY = "file_system"
+
+
+# ImageNet stats — the normalization every RDED loader uses.
+IMAGENET_NORM = transforms.Normalize(
+    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+)
+
+
+def eval_transform(input_size):
+    """Deterministic eval pipeline shared by main_worker's val_loader and the
+    diagnostics loaders: Resize -> CenterCrop -> ToTensor -> ImageNet normalize."""
+    return transforms.Compose(
+        [
+            transforms.Resize(input_size // 7 * 8, antialias=True),
+            transforms.CenterCrop(input_size),
+            transforms.ToTensor(),
+            IMAGENET_NORM,
+        ]
+    )
+
+
+# (nclass, input_size, val_ipc) for the small datasets in scope. Single source of
+# truth shared by argument.py's per-subset block and tools/diagnose_geometry.py.
+DATASET_META = {
+    "cifar10": (10, 32, 1000),
+    "cifar100": (100, 32, 100),
+    "tinyimagenet": (200, 64, 50),
+}
+
+
+def _find_last_linear(model):
+    """Return the last nn.Linear module in `model` (unwraps DataParallel)."""
+    if isinstance(model, nn.DataParallel):
+        model = model.module
+    last = None
+    for m in model.modules():
+        if isinstance(m, nn.Linear):
+            last = m
+    return last
 
 
 def seed_everything(seed: int) -> None:

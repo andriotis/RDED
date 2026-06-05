@@ -3,6 +3,7 @@ import os
 import math
 
 from validation.losses import LOSS_REGISTRY
+from validation.utils import DATASET_META
 
 parser = argparse.ArgumentParser("RDED")
 """Synthesis"""
@@ -191,6 +192,34 @@ parser.add_argument(
     help="skip synthesis and reuse existing syn_data (paired-protocol primitive: synth once, train N students)",
 )
 
+# Trustworthiness diagnostics (NC + calibration + open-set). Off by default so
+# normal sweeps are untouched; when on, runs once post-training on the student.
+parser.add_argument(
+    "--diagnostics",
+    action="store_true",
+    help="after training, measure ECE + OSCR/AUROC/FPR95 (vs OOD) + NC on the student "
+         "and log them under the 'diag' column of results.jsonl",
+)
+parser.add_argument(
+    "--ood-dataset",
+    type=str,
+    default="svhn",
+    choices=["svhn"],
+    help="OOD negatives for open-set metrics (currently only 'svhn')",
+)
+parser.add_argument(
+    "--ood-data-path",
+    type=str,
+    default="",
+    help="override download/cache dir for the OOD dataset (default ./data/_torchvision_cache)",
+)
+parser.add_argument(
+    "--results-file",
+    type=str,
+    default=None,
+    help="override results JSONL path (default ./logs/results.jsonl); useful for smoke runs",
+)
+
 # Aim tracking (augments results.jsonl; does not replace it).
 parser.add_argument(
     "--aim-repo",
@@ -282,23 +311,9 @@ elif args.subset == "imagenet-1k":
     args.val_ipc = 50
     args.input_size = 224
 
-elif args.subset == "cifar10":
-    args.nclass = 10
+elif args.subset in DATASET_META:
+    args.nclass, args.input_size, args.val_ipc = DATASET_META[args.subset]
     args.classes = range(args.nclass)
-    args.val_ipc = 1000
-    args.input_size = 32
-
-elif args.subset == "cifar100":
-    args.nclass = 100
-    args.classes = range(args.nclass)
-    args.val_ipc = 100
-    args.input_size = 32
-
-elif args.subset == "tinyimagenet":
-    args.nclass = 200
-    args.classes = range(args.nclass)
-    args.val_ipc = 50
-    args.input_size = 64
 
 args.nclass = len(args.classes)
 
