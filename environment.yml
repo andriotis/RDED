@@ -1,0 +1,16 @@
+# Miniconda/conda environment for RDED.
+#
+# Create:   conda env create -f environment.yml
+# Update:   conda env update -f environment.yml --prune
+# Activate: conda activate rded
+#
+# Python and pip are managed by conda; all project libraries (incl. the
+# CUDA 12.1 torch build) are installed from requirements.txt via pip.
+name: rded
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r requirements.txt

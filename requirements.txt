@@ -1,3 +1,14 @@
+# pip dependencies for the RDED environment.
+#
+# Two ways to install:
+#   1) miniconda (recommended): `conda env create -f environment.yml`
+#      (creates the `rded` env with Python 3.10 and installs this file via pip)
+#   2) into an already-activated env: `pip install -r requirements.txt`
+
+# Resolve the CUDA 12.1 torch/torchvision wheels (the build verified on this
+# box: torch 2.1.0+cu121). Falls back to PyPI for everything else below.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
 # Pinned: synthesize/utils.py relies on the legacy torchvision
 # `pretrained=True` keyword (removed in newer torchvision releases).
 torch==2.1.0
@@ -11,6 +22,7 @@ numpy<2
 Pillow
 tqdm
 pandas
+# tabulate backs `DataFrame.to_markdown()` (tools/analyze.py).
 tabulate
 PyYAML
 
