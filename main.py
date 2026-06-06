@@ -21,4 +21,6 @@ if __name__ == "__main__":
             )
     else:
         synth_main(args)
+        if args.synth_only:
+            sys.exit(0)
     valid_main(args)

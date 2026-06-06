@@ -191,6 +191,11 @@ parser.add_argument(
     action="store_true",
     help="skip synthesis and reuse existing syn_data (paired-protocol primitive: synth once, train N students)",
 )
+parser.add_argument(
+    "--synth-only",
+    action="store_true",
+    help="run synthesis and exit; skip training (used by diagnose.sh pre-pass)",
+)
 
 # Trustworthiness diagnostics (NC + calibration + open-set). Off by default so
 # normal sweeps are untouched; when on, runs once post-training on the student.

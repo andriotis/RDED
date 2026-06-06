@@ -8,8 +8,8 @@
 #           measure ECE/OSCR/AUROC/FPR95/NC on it (H2). Slow (hours; 12 runs =
 #           4 configs x 3 seeds, ipc 10). Writes the 'diag' column of results.jsonl.
 #
-# Distilled sets for every config below already exist under ./exp, so training
-# uses --skip-synth (no re-synthesis).
+# Distilled sets are synthesized automatically if missing (synthesis pre-pass),
+# then training uses --skip-synth (no re-synthesis).
 #
 # Usage (activate the env first: conda activate rded):
 #   bash scripts/diagnose.sh         # geom then train (default: all)
@@ -33,6 +33,19 @@ CONFIGS=(
   "tinyimagenet conv4"
 )
 
+ensure_synth () {
+  local subset=$1 arch=$2 ipc=$3
+  local syn_path="./exp/${subset}_${arch}_f${FACTOR}_mipc${MIPC}_ipc${ipc}_cr${CR}/syn_data"
+  if [[ ! -d "$syn_path" ]] || [[ -z "$(ls -A "$syn_path" 2>/dev/null)" ]]; then
+    echo "### SYNTHESIZE  $subset $arch ipc$ipc (missing – generating now)"
+    python main.py \
+      --subset "$subset" --arch-name "$arch" --stud-name "$arch" \
+      --factor $FACTOR --num-crop $CR --mipc $MIPC --ipc "$ipc" \
+      --seed "${SEEDS[0]}" \
+      --synth-only
+  fi
+}
+
 run_geo () {
   local subset=$1 arch=$2 ipc=$3 seed=$4
   echo "### GEOMETRY  $subset $arch ipc$ipc seed$seed"
@@ -50,6 +63,11 @@ run_train () {
     --re-epochs "$EPOCHS" --seed "$seed" \
     --skip-synth --diagnostics --ood-dataset svhn
 }
+
+echo "==== synthesis pre-pass (skip if datasets exist) ===="
+for ipc in "${IPCS[@]}"; do
+  for cfg in "${CONFIGS[@]}"; do ensure_synth $cfg "$ipc"; done
+done
 
 if [[ "$MODE" == "all" || "$MODE" == "geom" ]]; then
   echo "==== geometry pass (H1 + teacher reference) ===="

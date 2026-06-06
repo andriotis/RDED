@@ -17,6 +17,7 @@ torchvision==0.16.0
 # Pinned: torch 2.1.0 wheels are compiled against NumPy 1.x and will warn
 # (and risk segfaults) under NumPy 2.x.
 numpy<2
+scipy
 
 # Unpinned: stable APIs.
 Pillow
