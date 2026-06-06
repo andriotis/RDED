@@ -212,6 +212,10 @@ py_args=(
   --re-epochs    "$RE_EPOCHS"
   --seed         "$SEED"
   --run-tag      "$RUN_TAG"
+  # Seed-scope the synth dir so parallel cells (run_sweep.py packs many at once)
+  # never share — and thus never rmtree — the same distilled set. exp_name
+  # already carries the other synth-key fields; the seed leaf completes it.
+  --syn-data-path "syn_data_seed${SEED}"
 )
 if [[ -n "$SWEEP_NAME" ]]; then
   py_args+=(--sweep-name "$SWEEP_NAME")
@@ -232,10 +236,18 @@ fi
 
 export PYTHONHASHSEED="$SEED"
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
+# Pin this run to a single GPU. run_sweep.py sets CUDA_VISIBLE_DEVICES per cell
+# (one GPU per slot); for a bare/direct run, default to GPU 0 so we never fan a
+# tiny batch across all GPUs via DataParallel (which only adds scatter/gather
+# overhead for these small models). Honor any value already set by the caller.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Make CUDA's device numbering match nvidia-smi's (PCI order) so the id
+# run_sweep.py picked addresses the same physical GPU it sized for.
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 
 if [[ $DRY_RUN -eq 1 ]]; then
-  echo "[dry-run] python ./main.py ${py_args[*]} -> $log"
+  echo "[dry-run] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python ./main.py ${py_args[*]} -> $log"
 else
-  echo "[$(date +%H:%M:%S)] dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED weights=$CANON_JSON -> $log"
+  echo "[$(date +%H:%M:%S)] gpu=$CUDA_VISIBLE_DEVICES dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED weights=$CANON_JSON -> $log"
   python ./main.py "${py_args[@]}" 2>&1 | tee "$log"
 fi

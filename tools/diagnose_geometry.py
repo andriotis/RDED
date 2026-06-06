@@ -55,6 +55,9 @@ def build_args():
     p.add_argument("--factor", type=int, default=1)
     p.add_argument("--mipc", type=int, default=300)
     p.add_argument("--num-crop", type=int, default=5)
+    p.add_argument("--syn-leaf", type=str, default="syn_data",
+                   help="synth dir leaf under exp/<exp_name>/ (default 'syn_data'; "
+                        "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
@@ -72,7 +75,7 @@ def build_args():
         f"{args.subset}_{args.arch_name}_f{args.factor}"
         f"_mipc{args.mipc}_ipc{args.ipc}_cr{args.num_crop}"
     )
-    args.syn_data_path = f"./exp/{args.exp_name}/syn_data"
+    args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"
     args.train_dir = f"./data/{args.subset}/train/"
     args.val_dir = f"./data/{args.subset}/val/"
     return args

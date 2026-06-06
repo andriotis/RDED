@@ -11,6 +11,7 @@ Schema (one row per completed run):
   best_top1, final_top1, nc1, nc2, nc3, nc4, exp_name
 """
 
+import fcntl
 import json
 import os
 import time
@@ -50,6 +51,12 @@ def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None):
         "diag": diagnostics,
         "exp_name": args.exp_name,
     }
+    # Parallel sweep cells may finish near-simultaneously; take an exclusive
+    # lock so concurrent appends can't interleave or truncate a JSONL line.
+    line = json.dumps(row) + "\n"
     with open(path, "a") as f:
-        f.write(json.dumps(row) + "\n")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line)
+        f.flush()
+        fcntl.flock(f, fcntl.LOCK_UN)
     return path
