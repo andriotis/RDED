@@ -20,6 +20,7 @@ Appends one JSON object per subject to logs/diagnostics.jsonl and prints a table
 """
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -167,9 +168,16 @@ def main():
         "num_crop": args.num_crop,
         "seed": args.seed,
     }
+    # Parallel diagnose.sh geom runs append concurrently; hold an exclusive lock
+    # across the whole block so one run's rows can't interleave another's.
+    payload = "".join(
+        json.dumps({**base, "subject": subject, **m}) + "\n" for subject, m in rows
+    )
     with open(args.results_file, "a") as f:
-        for subject, m in rows:
-            f.write(json.dumps({**base, "subject": subject, **m}) + "\n")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(payload)
+        f.flush()
+        fcntl.flock(f, fcntl.LOCK_UN)
     print(f"Logged {len(rows)} rows to {args.results_file}")
 
 

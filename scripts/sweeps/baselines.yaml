@@ -7,7 +7,7 @@
 
 defaults:
   seed: [42, 43, 44]
-  ipc: [10]
+  ipc: [1, 10, 50]
   weights:
     kl: 1.0
   factor: 1
@@ -20,14 +20,14 @@ experiments:
     dataset: cifar100
     arch: conv3
 
-  # - name: cifar100_resnet18
-  #   dataset: cifar100
-  #   arch: resnet18_modified
+  - name: cifar100_resnet18
+    dataset: cifar100
+    arch: resnet18_modified
 
-  # - name: tinyimagenet_conv4
-  #   dataset: tinyimagenet
-  #   arch: conv4
+  - name: tinyimagenet_conv4
+    dataset: tinyimagenet
+    arch: conv4
 
-  # - name: tinyimagenet_resnet18
-  #   dataset: tinyimagenet
-  #   arch: resnet18_modified
+  - name: tinyimagenet_resnet18
+    dataset: tinyimagenet
+    arch: resnet18_modified
