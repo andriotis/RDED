@@ -55,6 +55,10 @@ def init_images(args, model=None):
             labels,
             args.input_size,
             m=args.num_crop,
+            method=getattr(args, "select_method", "stock"),
+            floor_mult=getattr(args, "select_realism_floor", 3.0),
+            k=getattr(args, "select_k", 8),
+            rng_seed=args.seed * 100003 + c,
         )
         images = mix_images(images, args.input_size, args.factor, args.ipc)
         save_images(args, denormalize(images), c)

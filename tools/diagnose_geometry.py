@@ -60,6 +60,10 @@ def build_args():
                    help="synth dir leaf under exp/<exp_name>/ (default 'syn_data'; "
                         "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
+    p.add_argument("--select-method", type=str, default="stock",
+                   choices=["stock", "random", "stratified", "covmatch"],
+                   help="inspect a variance-aware distilled set (tags exp_name with _sel<method>, "
+                        "matching argument.py); 'stock' is the plain RDED set")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--re-batch-size", type=int, default=256)
@@ -76,6 +80,8 @@ def build_args():
         f"{args.subset}_{args.arch_name}_f{args.factor}"
         f"_mipc{args.mipc}_ipc{args.ipc}_cr{args.num_crop}"
     )
+    if args.select_method != "stock":
+        args.exp_name += f"_sel{args.select_method}"
     args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"
     args.train_dir = f"./data/{args.subset}/train/"
     args.val_dir = f"./data/{args.subset}/val/"

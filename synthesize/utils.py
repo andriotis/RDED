@@ -1,3 +1,5 @@
+import math
+
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
@@ -98,41 +100,188 @@ def cross_entropy(y_pre, y):
     return (-torch.log(y_pre.gather(1, y.view(-1, 1))))[:, 0]
 
 
-def selector(n, model, images, labels, size, m=5):
+def _forward_logits_feats(model, tensor, batch_size, capture_feats):
+    """Batched teacher forward returning (logits, feats|None).
+
+    With capture_feats=False this reproduces ``batched_forward`` exactly (so the stock
+    selection path is byte-identical). When features are needed we run the *unwrapped*
+    module with a hook on the last Linear's input: registering the hook on a DataParallel
+    wrapper would miss the replicas on non-primary GPUs, so we unwrap and forward on one
+    device (synthesis is per-class, batches are small).
+    """
+    if not capture_feats:
+        return batched_forward(model, tensor, batch_size), None
+
+    from validation.utils import _find_last_linear
+
+    core = model.module if isinstance(model, nn.DataParallel) else model
+    core.eval()
+    fc = _find_last_linear(core)
+    buf = {}
+    handle = fc.register_forward_hook(
+        lambda mod, inp, out: buf.__setitem__("f", inp[0].detach())
+    )
+    logits, feats = [], []
+    try:
+        with torch.no_grad():
+            for i in range(0, tensor.size(0), batch_size):
+                out = core(tensor[i : i + batch_size])
+                logits.append(out.detach())
+                feats.append(buf["f"].flatten(1))
+    finally:
+        handle.remove()
+    return torch.cat(logits, 0), torch.cat(feats, 0)
+
+
+def _realism_floor(dist, n, floor_mult):
+    """Indices (into the per-class candidate pool) of the eligible, realistic crops:
+    the ceil(floor_mult * n) lowest teacher-CE-loss candidates (never fewer than n).
+
+    Variance-seeking selectors choose within this floored pool so they trade confidence
+    for diversity without ever picking crops the teacher reads as garbage.
+    """
+    pool = min(dist.numel(), max(n, int(math.ceil(floor_mult * n))))
+    return torch.argsort(dist, descending=False)[:pool]
+
+
+def _kmeans(x, k, gen, iters=10):
+    """Tiny Lloyd k-means on CPU features (no sklearn). Returns a [P] cluster assignment.
+    Deterministic given `gen` (random-point init)."""
+    P = x.shape[0]
+    centers = x[torch.randperm(P, generator=gen)[:k]].clone()
+    assign = torch.zeros(P, dtype=torch.long)
+    for _ in range(iters):
+        assign = torch.cdist(x, centers).argmin(dim=1)
+        for c in range(k):
+            mask = assign == c
+            if mask.any():
+                centers[c] = x[mask].mean(dim=0)
+    return assign
+
+
+def _select_stratified(n, dist, feats, k, gen):
+    """v0: k-means the floored pool's features, then pick n round-robin across clusters
+    (most-confident-first within each), so the selection spans the within-class spread
+    instead of piling onto the single most-confident mode.
+    """
+    P = feats.shape[0]
+    k = max(1, min(k, P))
+    assign = _kmeans(feats.float(), k, gen)
+    buckets = []
+    for c in range(k):
+        idx = (assign == c).nonzero(as_tuple=True)[0]
+        if idx.numel():
+            buckets.append(idx[torch.argsort(dist[idx])].tolist())  # ascending loss
+    sel, depth = [], 0
+    while len(sel) < n:
+        progressed = False
+        for b in buckets:
+            if depth < len(b):
+                sel.append(b[depth])
+                progressed = True
+                if len(sel) >= n:
+                    break
+        if not progressed:
+            break
+        depth += 1
+    return torch.tensor(sel[:n], dtype=torch.long)
+
+
+def _select_covmatch(n, feats, gen):
+    """v1: greedy log-det (DPP-MAP) maximization of the selected set's feature volume —
+    fast greedy of Chen et al. (2018) on the cosine kernel of the floored pool. Maximizing
+    log det spreads the picks across the class's feature subspace, which is exactly the
+    within-class variance the stock top-confidence selection collapses (so NC1 should rise
+    toward real). Optimization-free and deterministic; `gen` is unused.
+    """
+    n = min(n, feats.shape[0])
+    Z = F.normalize(feats.double(), dim=1)
+    P = Z.shape[0]
+    K = Z @ Z.t() + 1e-4 * torch.eye(P, dtype=torch.float64)
+
+    cis = torch.zeros(n, P, dtype=torch.float64)
+    di2 = torch.diagonal(K).clone()
+    selected = [int(torch.argmax(di2))]
+    for it in range(1, n):
+        j = selected[-1]
+        if it == 1:
+            ei = K[j] / torch.sqrt(di2[j].clamp_min(1e-12))
+        else:
+            ei = (K[j] - cis[: it - 1].t() @ cis[: it - 1, j]) / torch.sqrt(di2[j].clamp_min(1e-12))
+        cis[it - 1] = ei
+        di2 = di2 - ei * ei
+        di2[selected] = -float("inf")
+        selected.append(int(torch.argmax(di2)))
+    return torch.tensor(selected[:n], dtype=torch.long)
+
+
+def _select_variant(method, n, dist, feats, floor_mult, k, gen):
+    """Pick n indices (into the per-class pool) by a variance-aware rule, on CPU tensors.
+
+    `dist` [P] is the per-candidate teacher CE loss (realism); `feats` [P, D] the teacher
+    penultimate features. All variants first restrict to the realism-floored pool.
+    """
+    eligible = _realism_floor(dist, n, floor_mult)
+    if eligible.numel() <= n:
+        return eligible[:n]
+
+    if method == "random":
+        perm = torch.randperm(eligible.numel(), generator=gen)[:n]
+        return eligible[perm]
+    if method == "stratified":
+        local = _select_stratified(n, dist[eligible], feats[eligible], k, gen)
+        return eligible[local]
+    if method == "covmatch":
+        local = _select_covmatch(n, feats[eligible], gen)
+        return eligible[local]
+    raise ValueError(f"unknown --select-method: {method}")
+
+
+def selector(n, model, images, labels, size, m=5, method="stock",
+             floor_mult=3.0, k=8, rng_seed=0):
+    """Select n crops per class from the m-crop candidates.
+
+    method="stock" reproduces RDED exactly: keep the most teacher-confident crop per image,
+    then take the n globally-most-confident. The variance-aware methods (random/stratified/
+    covmatch) instead spread the selection across the class's within-class feature spread,
+    over a realism-floored pool, at the same n (= fixed IPC).
+    """
+    need_feats = method != "stock"
     with torch.no_grad():
-        # [mipc, m, 3, 224, 224]
+        # [mipc, m, C, H, W]
         images = images.cuda()
         s = images.shape
 
-        # [mipc * m, 3, 224, 224]
+        # [mipc * m, C, H, W], crop-major: row = crop_idx * mipc + img_idx
         images = images.permute(1, 0, 2, 3, 4)
         images = images.reshape(s[0] * s[1], s[2], s[3], s[4])
 
-        # [mipc * m, 1]
-        labels = labels.repeat(m).cuda()
+        labels_rep = labels.repeat(m).cuda()
 
-        # [mipc * m, n_class]
         batch_size = s[0]  # Change it for small GPU memory
-        preds = batched_forward(model, pad(images, size).cuda(), batch_size)
-
-        # [mipc * m]
-        dist = cross_entropy(preds, labels)
+        preds, feats = _forward_logits_feats(model, pad(images, size).cuda(), batch_size, need_feats)
 
         # [m, mipc]
-        dist = dist.reshape(m, s[0])
+        dist = cross_entropy(preds, labels_rep).reshape(m, s[0])
 
-        # [mipc]
+        # best crop per image -> [mipc]
         index = torch.argmin(dist, 0)
-        dist = dist[index, torch.arange(s[0])]
+        best_dist = dist[index, torch.arange(s[0])]
 
-        # [mipc, 3, 224, 224]
+        # gather the best crop's image (and feature) per source image
         sa = images.shape
-        images = images.reshape(m, s[0], sa[1], sa[2], sa[3])
-        images = images[index, torch.arange(s[0])]
+        images = images.reshape(m, s[0], sa[1], sa[2], sa[3])[index, torch.arange(s[0])]
+        if need_feats:
+            feats = feats.reshape(m, s[0], feats.shape[1])[index, torch.arange(s[0])]
 
-    indices = torch.argsort(dist, descending=False)[:n]
+    if method == "stock":
+        sel = torch.argsort(best_dist, descending=False)[:n]
+    else:
+        gen = torch.Generator().manual_seed(int(rng_seed))
+        sel = _select_variant(method, n, best_dist.cpu(), feats.cpu(), floor_mult, k, gen)
+
     torch.cuda.empty_cache()
-    return images[indices].detach()
+    return images[sel.to(images.device)].detach()
 
 
 def mix_images(input_img, out_size, factor, n):

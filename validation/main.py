@@ -44,7 +44,11 @@ from validation.losses import (
     TERMS_NEEDING_FEATURES,
 )
 from validation.nc_metrics import compute_nc_metrics
-from validation.diagnostics import build_svhn_ood_loader, run_diagnostics
+from validation.diagnostics import (
+    build_svhn_ood_loader,
+    build_real_train_fit_loader,
+    run_diagnostics,
+)
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
 
@@ -224,8 +228,9 @@ def main_worker(args):
         if getattr(args, "diagnostics", False):
             print("=> running diagnostics (ECE / OSCR / AUROC / FPR95 / NC) ...")
             ood_loader = build_svhn_ood_loader(args)
+            fit_loader = build_real_train_fit_loader(args)
             diagnostics = run_diagnostics(
-                student_model, args.val_loader, ood_loader, args.nclass
+                student_model, args.val_loader, ood_loader, args.nclass, fit_loader=fit_loader
             )
             print(f"Diagnostics: {diagnostics}")
 

@@ -191,6 +191,31 @@ parser.add_argument(
     action="store_true",
     help="skip synthesis and reuse existing syn_data (paired-protocol primitive: synth once, train N students)",
 )
+
+# Stage-1 selection (the variance-aware intervention). 'stock' = RDED top-confidence.
+# The others inject within-class variance over a realism-floored pool at the same IPC.
+parser.add_argument(
+    "--select-method",
+    type=str,
+    default="stock",
+    choices=["stock", "random", "stratified", "covmatch"],
+    help="crop selection: stock=top teacher-confidence (RDED); random/stratified/covmatch "
+         "spread the selection across the class's feature spread at fixed IPC",
+)
+parser.add_argument(
+    "--select-realism-floor",
+    type=float,
+    default=3.0,
+    dest="select_realism_floor",
+    help="eligible pool = ceil(this * n_select) most-confident candidates (>=1); a realism "
+         "guard so variance-seeking selectors never pick teacher-garbage crops",
+)
+parser.add_argument(
+    "--select-k",
+    type=int,
+    default=8,
+    help="number of clusters for --select-method stratified",
+)
 parser.add_argument(
     "--synth-only",
     action="store_true",
@@ -217,6 +242,13 @@ parser.add_argument(
     type=str,
     default="",
     help="override download/cache dir for the OOD dataset (default ./data/_torchvision_cache)",
+)
+parser.add_argument(
+    "--fit-ipc",
+    type=int,
+    default=50,
+    help="images/class drawn from the real TRAIN split (held out from the student) to fit "
+         "the Mahalanobis class stats and the calibration temperature for --diagnostics",
 )
 parser.add_argument(
     "--results-file",
@@ -355,6 +387,10 @@ if args.re_accum_steps != 1:
 
 # result dir for saving
 args.exp_name = f"{args.subset}_{args.arch_name}_f{args.factor}_mipc{args.mipc}_ipc{args.ipc}_cr{args.num_crop}"
+# Key the distilled-set path by the selection method so non-stock variants are stored
+# (and synth-cached) separately and never clobber or get falsely reused as the stock set.
+if getattr(args, "select_method", "stock") != "stock":
+    args.exp_name += f"_sel{args.select_method}"
 if not os.path.exists(f"./exp/{args.exp_name}"):
     os.makedirs(f"./exp/{args.exp_name}")
 args.syn_data_path = os.path.join("./exp/" + args.exp_name, args.syn_data_path)

@@ -121,6 +121,97 @@ def energy_scores(logits, T=1.0):
     return (T * torch.logsumexp(logits.float() / T, dim=1)).numpy()
 
 
+def feat_norm_scores(features):
+    """L2 norm of penultimate features (higher => more in-distribution).
+
+    A crude *geometry-aware* score that needs no fitting: ID inputs tend to land far
+    from the origin (large activations) while OOD inputs collapse toward it. Useful as
+    a foil to MSP because it reads the feature magnitude, not the softmax.
+    """
+    return torch.linalg.norm(features.float(), dim=1).numpy()
+
+
+def fit_mahalanobis(features, labels, num_classes, shrinkage=1e-2, normalize=True):
+    """Class means + a single tied precision for a Mahalanobis OOD score (Lee et al. 2018).
+
+    One shared covariance is estimated by pooling per-class-centered features, then shrunk
+    toward a scaled identity so the (possibly high-dim / rank-deficient) covariance inverts
+    cleanly:  Sigma_shrunk = (1-a)*Sigma + a*(tr Sigma / D)*I.
+
+    Features are L2-normalized by default. A raw tied-covariance Mahalanobis on these
+    flattened high-dim penultimate features is dominated by the x'Px norm term and *inverts*
+    (OOD scores "closer" merely because it has smaller feature norm). Normalizing makes the
+    score read *directional* (cosine-space) consistency with the class-conditional structure;
+    the discarded magnitude is captured separately by feat_norm, so the two are complementary.
+    fit_mahalanobis and maha_scores must share the same `normalize` setting.
+
+    Returns (class_means [K, D] float64, precision [D, D] float64). Absent classes get a
+    mean of +inf so they can never win the nearest-class score.
+    """
+    feats = features.detach().to(torch.float64)
+    if normalize:
+        feats = F.normalize(feats, dim=1)
+    labels = labels.detach().long()
+    N, D = feats.shape
+
+    means = torch.zeros(num_classes, D, dtype=torch.float64)
+    counts = torch.zeros(num_classes, dtype=torch.float64)
+    means.index_add_(0, labels, feats)
+    counts.index_add_(0, labels, torch.ones(N, dtype=torch.float64))
+    present = counts > 0
+    means[present] = means[present] / counts[present].unsqueeze(1)
+
+    centered = feats - means[labels]
+    sigma = centered.t() @ centered / N
+    if shrinkage > 0:
+        scaled_diag = (torch.trace(sigma) / D)
+        sigma = (1.0 - shrinkage) * sigma + shrinkage * scaled_diag * torch.eye(D, dtype=torch.float64)
+    precision = torch.linalg.pinv(sigma)
+    means[~present] = float("inf")
+    return means, precision
+
+
+def maha_scores(features, class_means, precision, normalize=True):
+    """Max over classes of -(Mahalanobis distance)^2 to the class means (higher => ID).
+
+    Computed in the expanded form d_c(x) = x'Px - 2 x'P mu_c + mu_c' P mu_c so it is one
+    pair of matmuls over all samples/classes rather than a per-class loop. `normalize` must
+    match the value passed to fit_mahalanobis (see its docstring for why we normalize).
+    """
+    feats = features.detach().to(torch.float64)
+    if normalize:
+        feats = F.normalize(feats, dim=1)
+    present = ~torch.isinf(class_means).any(dim=1)
+    mu = class_means[present]                       # [Kp, D]
+
+    Px = feats @ precision                          # [N, D]
+    term_x = (feats * Px).sum(dim=1, keepdim=True)  # [N, 1]  x'Px
+    Pmu = mu @ precision                            # [Kp, D]
+    cross = feats @ Pmu.t()                         # [N, Kp]  x'P mu_c
+    term_mu = (mu * Pmu).sum(dim=1)                 # [Kp]     mu_c'P mu_c
+    dist2 = term_x - 2.0 * cross + term_mu          # [N, Kp]
+    return (-dist2.min(dim=1).values).numpy()       # higher = closer to a class = ID
+
+
+def fit_temperature(logits, labels):
+    """Single calibration scalar T minimizing NLL of softmax(logits / T).
+
+    Deterministic two-stage grid search (coarse geometric grid, then a local refine) over
+    T in [~0.05, 10] — no optimizer state, robust, reproducible. T > 1 softens an
+    overconfident model.
+    """
+    logits = logits.detach().float()
+    labels = labels.detach().long()
+
+    def nll(T):
+        return float(F.cross_entropy(logits / float(T), labels).item())
+
+    coarse = np.geomspace(0.5, 10.0, 60)
+    t0 = min(coarse, key=nll)
+    fine = np.linspace(max(0.05, t0 * 0.75), t0 * 1.3, 40)
+    return float(min(fine, key=nll))
+
+
 def _rankdata_avg(a):
     """Ranks of `a` (1..N) with ties assigned their average rank."""
     a = np.asarray(a)
@@ -232,6 +323,35 @@ def build_svhn_ood_loader(args, max_samples=10000):
     )
 
 
+def build_real_train_fit_loader(args, fit_ipc=None):
+    """A held-out slice of the real TRAIN split, preprocessed like the ID val loader.
+
+    The student trained only on the distilled set, so real-train images are genuinely
+    unseen by it — a clean held-out ID split for fitting the Mahalanobis class statistics
+    and the calibration temperature, without spending any of the real-val test set.
+    """
+    from validation.utils import ImageFolder, make_loader_kwargs
+
+    if fit_ipc is None:
+        fit_ipc = getattr(args, "fit_ipc", 50)
+    ds = ImageFolder(
+        classes=args.classes,
+        ipc=fit_ipc,
+        mem=True,
+        shuffle=True,
+        root=args.train_dir,
+        transform=eval_transform(args.input_size),
+    )
+    return torch.utils.data.DataLoader(
+        ds,
+        batch_size=args.re_batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+        **make_loader_kwargs(args.seed),
+    )
+
+
 def _id_panel(out, num_classes):
     """NC + calibration + top1 for one in-distribution collect_outputs() result."""
     nc = compute_nc_metrics(
@@ -250,7 +370,7 @@ def feature_geometry(model, loader, num_classes):
     return _id_panel(collect_outputs(model, loader, capture_features=True), num_classes)
 
 
-def run_diagnostics(model, val_loader, ood_loader, num_classes):
+def run_diagnostics(model, val_loader, ood_loader, num_classes, fit_loader=None):
     """Full trustworthiness panel for a classifier: NC + calibration + open-set.
 
     Args:
@@ -258,18 +378,49 @@ def run_diagnostics(model, val_loader, ood_loader, num_classes):
         val_loader: in-distribution test loader (real val).
         ood_loader: OOD negatives loader (e.g. SVHN).
         num_classes: K.
+        fit_loader: optional held-out ID loader (real-train slice). When given, enables the
+            geometry-aware Mahalanobis score and temperature scaling, both fit on it so no
+            metric is fit and evaluated on the same samples.
 
-    Returns a flat dict ready to log: nc1..nc4, ece/mce/avg_conf/acc/overconf_gap,
-    top1, and {oscr,auroc,fpr95} for both msp and energy scores.
+    Returns a flat dict ready to log: nc1..nc4, ece/mce/avg_conf/acc/overconf_gap, top1,
+    {oscr,auroc,fpr95} for msp / energy / feat_norm (and maha when fit_loader is given),
+    and — with fit_loader — temperature, ece_ts, auroc_msp_ts.
     """
     idd = collect_outputs(model, val_loader, capture_features=True)
-    ood = collect_outputs(model, ood_loader, capture_features=False)
+    ood = collect_outputs(model, ood_loader, capture_features=True)
 
     result = _id_panel(idd, num_classes)
     id_correct = idd["preds"].eq(idd["labels"]).numpy()
-    for name, score_fn in (("msp", msp_scores), ("energy", energy_scores)):
-        id_s = score_fn(idd["logits"])
-        ood_s = score_fn(ood["logits"])
+    have_feats = idd["features"] is not None and ood["features"] is not None
+
+    # score_fn signature: takes a collect_outputs() dict, returns higher=ID scores.
+    score_fns = {
+        "msp": lambda o: msp_scores(o["logits"]),
+        "energy": lambda o: energy_scores(o["logits"]),
+    }
+    if have_feats:
+        score_fns["feat_norm"] = lambda o: feat_norm_scores(o["features"])
+
+    if fit_loader is not None:
+        fit = collect_outputs(model, fit_loader, capture_features=have_feats)
+
+        # Geometry-aware Mahalanobis (class stats fit on held-out real-train features).
+        if have_feats and fit["features"] is not None:
+            means, precision = fit_mahalanobis(fit["features"], fit["labels"], num_classes)
+            score_fns["maha"] = lambda o: maha_scores(o["features"], means, precision)
+
+        # Temperature scaling: fit T on held-out real-train logits, then re-measure
+        # calibration (ece_ts) and MSP open-set (auroc_msp_ts) on the test split.
+        T = fit_temperature(fit["logits"], fit["labels"])
+        result["temperature"] = T
+        result["ece_ts"] = compute_ece(idd["logits"] / T, idd["labels"])["ece"]
+        id_msp_t = msp_scores(idd["logits"] / T)
+        ood_msp_t = msp_scores(ood["logits"] / T)
+        result["auroc_msp_ts"] = ood_metrics(id_msp_t, ood_msp_t)["auroc"]
+
+    for name, score_fn in score_fns.items():
+        id_s = score_fn(idd)
+        ood_s = score_fn(ood)
         om = ood_metrics(id_s, ood_s)
         result[f"oscr_{name}"] = oscr(id_s, id_correct, ood_s)
         result[f"auroc_{name}"] = om["auroc"]
