@@ -59,6 +59,7 @@ def init_images(args, model=None):
             floor_mult=getattr(args, "select_realism_floor", 3.0),
             k=getattr(args, "select_k", 8),
             rng_seed=args.seed * 100003 + c,
+            mean_weight=getattr(args, "momentmatch_mean_weight", 1.0),
         )
         images = mix_images(images, args.input_size, args.factor, args.ipc)
         save_images(args, denormalize(images), c)

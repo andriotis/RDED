@@ -215,11 +215,66 @@ def _select_covmatch(n, feats, gen):
     return torch.tensor(selected[:n], dtype=torch.long)
 
 
-def _select_variant(method, n, dist, feats, floor_mult, k, gen):
+def _select_momentmatch(n, cand_feats, target_feats, mean_weight, gen):
+    """v2: greedy moment-matching — choose the n candidates whose selected-set feature
+    mean+second-moment best match the class's *full-pool* moments, in L2-normalized
+    (cosine) space (same normalization as _select_covmatch / fit_mahalanobis).
+
+    Where covmatch maximizes the *volume* of the floored pool (independent of the target
+    distribution's shape), momentmatch minimizes
+
+        J(S) = ||M_S - M_t||_F^2  +  mean_weight * ||mu_S - mu_t||^2
+
+    with M = (1/|.|) sum z z^T the uncentered second moment and mu the mean. Matching both
+    M and mu is equivalent to matching the centered covariance Sigma = M - mu mu^T — the
+    exact statistic the tied-covariance Mahalanobis OOD score reads — so the selected set
+    reproduces the class's anisotropic spread instead of merely spanning it.
+
+    Greedy forward selection: each pick adds one z_j, a rank-1 update to the running
+    G = sum_{i in S} z_i z_i^T. The j-dependent part of ||(G + z_j z_j^T)/k - M_t||_F^2 is
+    (2/k^2) z_j^T G z_j + 1/k^2 - (2/k) z_j^T M_t z_j; maintaining ZcG = Zc @ G by a rank-1
+    update keeps every step O(P*D). Deterministic; `gen` is unused.
+
+    cand_feats [P, D]: realism-floored selection candidates.
+    target_feats [M, D]: the full per-class pool defining (mu_t, M_t); M >= P.
+    Returns n distinct LOCAL indices into cand_feats.
+    """
+    n = min(n, cand_feats.shape[0])
+    Zc = F.normalize(cand_feats.double(), dim=1)          # [P, D] candidates
+    Zt = F.normalize(target_feats.double(), dim=1)        # [M, D] target pool
+    P, D = Zc.shape
+
+    mu_t = Zt.mean(dim=0)                                  # [D]
+    M_t = (Zt.t() @ Zt) / Zt.shape[0]                      # [D, D] uncentered 2nd moment
+    quad_Mt = ((Zc @ M_t) * Zc).sum(dim=1)                # [P]  z_j^T M_t z_j  (constant)
+
+    s1 = torch.zeros(D, dtype=torch.float64)               # running sum of selected z
+    ZcG = torch.zeros(P, D, dtype=torch.float64)           # Zc @ G, G = sum z_i z_i^T
+    avail = torch.ones(P, dtype=torch.bool)
+    selected = []
+    for step in range(1, n + 1):
+        k = float(step)
+        mu = (s1.unsqueeze(0) + Zc) / k                    # [P, D] candidate-augmented mean
+        mean_term = ((mu - mu_t.unsqueeze(0)) ** 2).sum(dim=1)         # [P]
+        quad_G = (ZcG * Zc).sum(dim=1)                     # [P]  z_j^T G z_j
+        sm_term = (2.0 / k**2) * quad_G + 1.0 / k**2 - (2.0 / k) * quad_Mt
+        J = sm_term + mean_weight * mean_term              # [P]  (shared consts dropped)
+        J[~avail] = float("inf")
+        j = int(torch.argmin(J))
+        selected.append(j)
+        avail[j] = False
+        zj = Zc[j]                                         # [D]
+        ZcG += (Zc @ zj).unsqueeze(1) * zj.unsqueeze(0)    # rank-1: G += zj zj^T
+        s1 += zj
+    return torch.tensor(selected[:n], dtype=torch.long)
+
+
+def _select_variant(method, n, dist, feats, floor_mult, k, gen, mean_weight=1.0):
     """Pick n indices (into the per-class pool) by a variance-aware rule, on CPU tensors.
 
     `dist` [P] is the per-candidate teacher CE loss (realism); `feats` [P, D] the teacher
-    penultimate features. All variants first restrict to the realism-floored pool.
+    penultimate features. All variants first restrict to the realism-floored pool; covmatch
+    and momentmatch additionally read the *full* pool's feature geometry as their target.
     """
     eligible = _realism_floor(dist, n, floor_mult)
     if eligible.numel() <= n:
@@ -234,17 +289,21 @@ def _select_variant(method, n, dist, feats, floor_mult, k, gen):
     if method == "covmatch":
         local = _select_covmatch(n, feats[eligible], gen)
         return eligible[local]
+    if method == "momentmatch":
+        local = _select_momentmatch(n, feats[eligible], feats, mean_weight, gen)
+        return eligible[local]
     raise ValueError(f"unknown --select-method: {method}")
 
 
 def selector(n, model, images, labels, size, m=5, method="stock",
-             floor_mult=3.0, k=8, rng_seed=0):
+             floor_mult=3.0, k=8, rng_seed=0, mean_weight=1.0):
     """Select n crops per class from the m-crop candidates.
 
     method="stock" reproduces RDED exactly: keep the most teacher-confident crop per image,
     then take the n globally-most-confident. The variance-aware methods (random/stratified/
-    covmatch) instead spread the selection across the class's within-class feature spread,
-    over a realism-floored pool, at the same n (= fixed IPC).
+    covmatch/momentmatch) instead spread the selection across the class's within-class feature
+    spread, over a realism-floored pool, at the same n (= fixed IPC); momentmatch additionally
+    matches the full pool's mean+covariance (mean_weight scales the mean term).
     """
     need_feats = method != "stock"
     with torch.no_grad():
@@ -278,7 +337,7 @@ def selector(n, model, images, labels, size, m=5, method="stock",
         sel = torch.argsort(best_dist, descending=False)[:n]
     else:
         gen = torch.Generator().manual_seed(int(rng_seed))
-        sel = _select_variant(method, n, best_dist.cpu(), feats.cpu(), floor_mult, k, gen)
+        sel = _select_variant(method, n, best_dist.cpu(), feats.cpu(), floor_mult, k, gen, mean_weight)
 
     torch.cuda.empty_cache()
     return images[sel.to(images.device)].detach()

@@ -193,6 +193,29 @@ def maha_scores(features, class_means, precision, normalize=True):
     return (-dist2.min(dim=1).values).numpy()       # higher = closer to a class = ID
 
 
+def within_class_cov(features, labels, num_classes, normalize=True):
+    """Pooled within-class covariance of (optionally L2-normalized) features — the tied
+    Sigma the Mahalanobis OOD score reads, and the target the momentmatch selector matches.
+
+    Returns [D, D] float64 (no shrinkage; this is the raw geometry, not for inversion). The
+    Frobenius norm of the gap between this on a distilled set vs a real subset is the mediator
+    that links variance-preserving selection to the downstream Mahalanobis-AUROC gain.
+    """
+    feats = features.detach().to(torch.float64)
+    if normalize:
+        feats = F.normalize(feats, dim=1)
+    labels = labels.detach().long()
+    N, D = feats.shape
+    means = torch.zeros(num_classes, D, dtype=torch.float64)
+    counts = torch.zeros(num_classes, dtype=torch.float64)
+    means.index_add_(0, labels, feats)
+    counts.index_add_(0, labels, torch.ones(N, dtype=torch.float64))
+    present = counts > 0
+    means[present] = means[present] / counts[present].unsqueeze(1)
+    centered = feats - means[labels]
+    return centered.t() @ centered / N
+
+
 def fit_temperature(logits, labels):
     """Single calibration scalar T minimizing NLL of softmax(logits / T).
 
@@ -294,18 +317,32 @@ class _LabeledWrapper(torch.utils.data.Dataset):
         return self.transform(img), 0
 
 
-def build_svhn_ood_loader(args, max_samples=10000):
-    """SVHN test split as OOD negatives, preprocessed like the ID val_loader.
-
-    SVHN is native 32x32 (matches CIFAR-100); for Tiny-ImageNet (input_size 64)
-    the shared eval_transform resizes it up. Downloads to ./data/_torchvision_cache.
-    """
+def _ood_base_dataset(name, root):
+    """Return the raw (PIL, label) OOD test dataset by name, downloading to `root`."""
     import torchvision.datasets as datasets
+
+    if name == "svhn":
+        return datasets.SVHN(root=root, split="test", download=True)
+    if name == "cifar10":
+        # Near-OOD for CIFAR-100 (natural images, disjoint classes).
+        return datasets.CIFAR10(root=root, train=False, download=True)
+    if name == "dtd":
+        # Describable Textures — far-OOD textures (torchvision >= 0.13).
+        return datasets.DTD(root=root, split="test", download=True)
+    raise ValueError(f"unknown OOD set '{name}' (known: svhn, cifar10, dtd)")
+
+
+def build_ood_loader(name, args, max_samples=10000):
+    """A named OOD test set as negatives, preprocessed exactly like the ID val_loader.
+
+    All sets are resized to args.input_size by the shared eval_transform (SVHN/CIFAR-10 are
+    native 32x32; DTD is variable). Deterministically subsampled to max_samples for speed.
+    Downloads to args.ood_data_path or ./data/_torchvision_cache.
+    """
     from validation.utils import make_loader_kwargs
 
     root = args.ood_data_path or "./data/_torchvision_cache"
-    base = datasets.SVHN(root=root, split="test", download=True)
-
+    base = _ood_base_dataset(name, root)
     # Deterministic subsample for speed / rough class balance with the ID set.
     if max_samples and len(base) > max_samples:
         g = torch.Generator().manual_seed(args.seed)
@@ -321,6 +358,11 @@ def build_svhn_ood_loader(args, max_samples=10000):
         pin_memory=True,
         **make_loader_kwargs(args.seed),
     )
+
+
+def build_svhn_ood_loader(args, max_samples=10000):
+    """Back-compat wrapper: SVHN test split as OOD negatives (see build_ood_loader)."""
+    return build_ood_loader("svhn", args, max_samples)
 
 
 def build_real_train_fit_loader(args, fit_ipc=None):
@@ -376,7 +418,8 @@ def run_diagnostics(model, val_loader, ood_loader, num_classes, fit_loader=None)
     Args:
         model: classifier (already on CUDA; DataParallel ok).
         val_loader: in-distribution test loader (real val).
-        ood_loader: OOD negatives loader (e.g. SVHN).
+        ood_loader: OOD negatives. A single DataLoader (legacy) OR an ordered dict
+            {name: loader} for multiple OOD sets.
         num_classes: K.
         fit_loader: optional held-out ID loader (real-train slice). When given, enables the
             geometry-aware Mahalanobis score and temperature scaling, both fit on it so no
@@ -384,14 +427,20 @@ def run_diagnostics(model, val_loader, ood_loader, num_classes, fit_loader=None)
 
     Returns a flat dict ready to log: nc1..nc4, ece/mce/avg_conf/acc/overconf_gap, top1,
     {oscr,auroc,fpr95} for msp / energy / feat_norm (and maha when fit_loader is given),
-    and — with fit_loader — temperature, ece_ts, auroc_msp_ts.
+    and — with fit_loader — temperature, ece_ts, auroc_msp_ts. The ID-only metrics and the
+    Mahalanobis/temperature fits are computed once and shared across OOD sets. With a dict
+    ood_loader, the OOD-dependent metrics are also returned per set under result["ood"][name];
+    the FIRST set is mirrored at the top level so single-loader callers are byte-unchanged.
     """
-    idd = collect_outputs(model, val_loader, capture_features=True)
-    ood = collect_outputs(model, ood_loader, capture_features=True)
+    if isinstance(ood_loader, dict):
+        ood_loaders, multi = dict(ood_loader), True
+    else:
+        ood_loaders, multi = {"_primary": ood_loader}, False
 
+    idd = collect_outputs(model, val_loader, capture_features=True)
     result = _id_panel(idd, num_classes)
     id_correct = idd["preds"].eq(idd["labels"]).numpy()
-    have_feats = idd["features"] is not None and ood["features"] is not None
+    have_feats = idd["features"] is not None
 
     # score_fn signature: takes a collect_outputs() dict, returns higher=ID scores.
     score_fns = {
@@ -401,28 +450,35 @@ def run_diagnostics(model, val_loader, ood_loader, num_classes, fit_loader=None)
     if have_feats:
         score_fns["feat_norm"] = lambda o: feat_norm_scores(o["features"])
 
+    # ID-side fits (Mahalanobis class stats + calibration temperature), shared across sets.
+    T, id_msp_t = None, None
     if fit_loader is not None:
         fit = collect_outputs(model, fit_loader, capture_features=have_feats)
-
-        # Geometry-aware Mahalanobis (class stats fit on held-out real-train features).
         if have_feats and fit["features"] is not None:
             means, precision = fit_mahalanobis(fit["features"], fit["labels"], num_classes)
             score_fns["maha"] = lambda o: maha_scores(o["features"], means, precision)
-
-        # Temperature scaling: fit T on held-out real-train logits, then re-measure
-        # calibration (ece_ts) and MSP open-set (auroc_msp_ts) on the test split.
         T = fit_temperature(fit["logits"], fit["labels"])
         result["temperature"] = T
         result["ece_ts"] = compute_ece(idd["logits"] / T, idd["labels"])["ece"]
         id_msp_t = msp_scores(idd["logits"] / T)
-        ood_msp_t = msp_scores(ood["logits"] / T)
-        result["auroc_msp_ts"] = ood_metrics(id_msp_t, ood_msp_t)["auroc"]
 
-    for name, score_fn in score_fns.items():
-        id_s = score_fn(idd)
-        ood_s = score_fn(ood)
-        om = ood_metrics(id_s, ood_s)
-        result[f"oscr_{name}"] = oscr(id_s, id_correct, ood_s)
-        result[f"auroc_{name}"] = om["auroc"]
-        result[f"fpr95_{name}"] = om["fpr95"]
+    ood_block = {}
+    for i, (name, oloader) in enumerate(ood_loaders.items()):
+        ood = collect_outputs(model, oloader, capture_features=have_feats)
+        per = {}
+        if T is not None:
+            ood_msp_t = msp_scores(ood["logits"] / T)
+            per["auroc_msp_ts"] = ood_metrics(id_msp_t, ood_msp_t)["auroc"]
+        for sname, score_fn in score_fns.items():
+            id_s = score_fn(idd)
+            ood_s = score_fn(ood)
+            om = ood_metrics(id_s, ood_s)
+            per[f"oscr_{sname}"] = oscr(id_s, id_correct, ood_s)
+            per[f"auroc_{sname}"] = om["auroc"]
+            per[f"fpr95_{sname}"] = om["fpr95"]
+        if i == 0:
+            result.update(per)  # primary OOD mirrored at top level (back-compat)
+        ood_block[name] = per
+    if multi:
+        result["ood"] = ood_block
     return result

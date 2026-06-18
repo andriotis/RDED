@@ -33,6 +33,8 @@ RE_EPOCHS="${RE_EPOCHS:-300}"
 MIPC="${MIPC:-300}"; NUM_CROP="${NUM_CROP:-5}"; FACTOR="${FACTOR:-1}"
 RESULTS_FILE="${RESULTS_FILE:-logs/results_select.jsonl}"
 REALISM_FLOOR="${REALISM_FLOOR:-3.0}"; SELECT_K="${SELECT_K:-8}"; FIT_IPC="${FIT_IPC:-50}"
+OOD_SETS="${OOD_SETS:-svhn}"          # comma list; svhn,dtd,cifar10 for the multi-OOD panel
+SAVE_STUDENT="${SAVE_STUDENT:-0}"     # 1 = persist student ckpt for --diagnostics-only re-eval
 DRY_RUN="${DRY_RUN:-0}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -51,12 +53,16 @@ for method in $METHODS; do
           --select-method "$method"
           --select-realism-floor "$REALISM_FLOOR" --select-k "$SELECT_K"
           --fit-ipc "$FIT_IPC"
-          --diagnostics --results-file "$RESULTS_FILE" --disable-aim
+          --diagnostics --ood-sets "$OOD_SETS"
+          --results-file "$RESULTS_FILE" --disable-aim
         )
-        # Reuse an existing seed-scoped stock distilled set if present (it is unaffected
-        # by this experiment); always re-synthesize the variant sets.
-        stock_dir="./exp/${dataset}_${arch}_f${FACTOR}_mipc${MIPC}_ipc${ipc}_cr${NUM_CROP}/syn_data_seed${seed}"
-        if [[ "$method" == "stock" && -d "$stock_dir" ]]; then
+        [[ "$SAVE_STUDENT" == "1" ]] && args+=(--save-student)
+        # Reuse an existing seed-scoped distilled set when present (synthesis is deterministic
+        # per seed, so the cached set is identical). Stock always reuses; other methods reuse
+        # only when SKIP_SYNTH=1 (e.g. a multi-OOD / checkpoint backfill that must not re-synth).
+        tag=""; [[ "$method" != "stock" ]] && tag="_sel${method}"
+        seed_dir="./exp/${dataset}_${arch}_f${FACTOR}_mipc${MIPC}_ipc${ipc}_cr${NUM_CROP}${tag}/syn_data_seed${seed}"
+        if [[ -d "$seed_dir" ]] && { [[ "$method" == "stock" ]] || [[ "${SKIP_SYNTH:-0}" == "1" ]]; }; then
           args+=(--skip-synth)
         fi
         echo "[$(date +%H:%M:%S)] gpu=$CUDA_VISIBLE_DEVICES method=$method $dataset/$arch ipc=$ipc seed=$seed -> $RESULTS_FILE"

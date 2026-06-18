@@ -6,6 +6,7 @@ from argument import args
 from synthesize.main import main as synth_main
 from validation.main import (
     main as valid_main,
+    diagnostics_only,
 )  # The relabel and validation are combined here for fast experiment
 from validation.utils import seed_everything
 
@@ -13,6 +14,10 @@ warnings.filterwarnings("ignore")
 
 if __name__ == "__main__":
     seed_everything(args.seed)
+    if getattr(args, "diagnostics_only", False):
+        # Training-free re-evaluation of a saved student checkpoint.
+        diagnostics_only(args)
+        sys.exit(0)
     if args.skip_synth:
         if not os.path.isdir(args.syn_data_path) or not os.listdir(args.syn_data_path):
             sys.exit(

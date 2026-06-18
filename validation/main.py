@@ -46,6 +46,7 @@ from validation.losses import (
 from validation.nc_metrics import compute_nc_metrics
 from validation.diagnostics import (
     build_svhn_ood_loader,
+    build_ood_loader,
     build_real_train_fit_loader,
     run_diagnostics,
 )
@@ -71,6 +72,69 @@ def forward_capture_feats(model, x, fc):
     finally:
         handle.remove()
     return out, feats["f"]
+
+
+def _student_ckpt_path(args):
+    """Seed-keyed student checkpoint path, co-located with the distilled set."""
+    syn = args.syn_data_path.rstrip("/")
+    return os.path.join(os.path.dirname(syn), f"student_{os.path.basename(syn)}.pth")
+
+
+def _ood_loaders(args):
+    """Ordered {name: loader} of OOD sets from --ood-sets (falls back to --ood-dataset)."""
+    names = [s.strip() for s in (getattr(args, "ood_sets", "") or "").split(",") if s.strip()]
+    if not names:
+        names = [getattr(args, "ood_dataset", "svhn")]
+    return {n: build_ood_loader(n, args) for n in names}
+
+
+def run_trust_panel(model, args):
+    """Trust panel (NC + calibration + open-set) over the configured OOD set(s)."""
+    fit_loader = build_real_train_fit_loader(args)
+    return run_diagnostics(model, args.val_loader, _ood_loaders(args), args.nclass, fit_loader=fit_loader)
+
+
+def diagnostics_only(args):
+    """Load a saved student checkpoint and run the trust panel only — no training.
+
+    Deterministic training means the checkpoint *is* the run, so this re-evaluates new
+    OOD sets / metrics for free. Requires a checkpoint from a prior --save-student run.
+    """
+    seed_everything(args.seed)
+    ckpt_path = _student_ckpt_path(args)
+    if not os.path.isfile(ckpt_path):
+        raise SystemExit(
+            f"--diagnostics-only needs a student checkpoint at {ckpt_path}; "
+            "run once with --save-student first."
+        )
+    print(f"=> loading student checkpoint {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    student_model = load_model(
+        model_name=args.stud_name, dataset=args.subset, pretrained=False, classes=args.classes
+    )
+    student_model.load_state_dict(ckpt["model"])
+    student_model = torch.nn.DataParallel(student_model).cuda()
+    student_model.eval()
+
+    args.val_loader = torch.utils.data.DataLoader(
+        ImageFolder(
+            classes=args.classes, ipc=args.val_ipc, mem=True, root=args.val_dir,
+            transform=eval_transform(args.input_size),
+        ),
+        batch_size=args.re_batch_size, shuffle=False, num_workers=args.workers,
+        pin_memory=True, **make_loader_kwargs(args.seed),
+    )
+    print("=> running diagnostics-only (no training) ...")
+    diag = run_trust_panel(student_model, args)
+    print(f"Diagnostics: {diag}")
+    results_path = log_run(
+        args,
+        best_top1=float(ckpt.get("best_top1", 0.0)),
+        final_top1=float(ckpt.get("best_top1", 0.0)),
+        nc_metrics={k: diag.get(k) for k in ("nc1", "nc2", "nc3", "nc4")},
+        diagnostics=diag,
+    )
+    print(f"Logged diagnostics-only run to {results_path}")
 
 
 def main(args):
@@ -222,16 +286,24 @@ def main_worker(args):
         if last_nc is not None:
             print(f"Final NC metrics: {last_nc}")
 
+        # Persist the trained student so new OOD sets / metrics can be re-evaluated
+        # later with --diagnostics-only (no retraining; training is deterministic).
+        if getattr(args, "save_student", False):
+            ckpt_path = _student_ckpt_path(args)
+            core = student_model.module if isinstance(student_model, torch.nn.DataParallel) else student_model
+            torch.save(
+                {"model": core.state_dict(), "arch": args.stud_name,
+                 "best_top1": float(best_acc1), "nclass": args.nclass},
+                ckpt_path,
+            )
+            print(f"Saved student checkpoint to {ckpt_path}")
+
         # Optional trustworthiness panel (NC + calibration + open-set) on the
         # trained student. Purely additive: does not touch the training above.
         diagnostics = None
         if getattr(args, "diagnostics", False):
             print("=> running diagnostics (ECE / OSCR / AUROC / FPR95 / NC) ...")
-            ood_loader = build_svhn_ood_loader(args)
-            fit_loader = build_real_train_fit_loader(args)
-            diagnostics = run_diagnostics(
-                student_model, args.val_loader, ood_loader, args.nclass, fit_loader=fit_loader
-            )
+            diagnostics = run_trust_panel(student_model, args)
             print(f"Diagnostics: {diagnostics}")
 
         results_path = log_run(

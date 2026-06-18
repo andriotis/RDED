@@ -42,8 +42,10 @@ from validation.utils import (
 )
 from validation.diagnostics import (
     build_svhn_ood_loader,
-    feature_geometry,
+    collect_outputs,
+    within_class_cov,
     run_diagnostics,
+    _id_panel,
 )
 
 
@@ -61,9 +63,11 @@ def build_args():
                         "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
     p.add_argument("--select-method", type=str, default="stock",
-                   choices=["stock", "random", "stratified", "covmatch"],
+                   choices=["stock", "random", "stratified", "covmatch", "momentmatch"],
                    help="inspect a variance-aware distilled set (tags exp_name with _sel<method>, "
                         "matching argument.py); 'stock' is the plain RDED set")
+    p.add_argument("--select-realism-floor", type=float, default=3.0, dest="select_realism_floor",
+                   help="must match the synthesized set's floor; path-keyed as _fl<F> when != 3.0")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--re-batch-size", type=int, default=256)
@@ -82,6 +86,8 @@ def build_args():
     )
     if args.select_method != "stock":
         args.exp_name += f"_sel{args.select_method}"
+        if abs(args.select_realism_floor - 3.0) > 1e-9:
+            args.exp_name += f"_fl{args.select_realism_floor:g}"
     args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"
     args.train_dir = f"./data/{args.subset}/train/"
     args.val_dir = f"./data/{args.subset}/val/"
@@ -132,8 +138,26 @@ def main():
     print("=> teacher-induced geometry on distilled set vs real-train subset")
     distilled_loader = _loader(args.syn_data_path, args.ipc, args)
     real_loader = _loader(args.train_dir, args.real_ipc, args)
-    geo_distilled = feature_geometry(teacher, distilled_loader, args.nclass)
-    geo_real = feature_geometry(teacher, real_loader, args.nclass)
+    out_d = collect_outputs(teacher, distilled_loader, capture_features=True)
+    out_r = collect_outputs(teacher, real_loader, capture_features=True)
+    geo_distilled = _id_panel(out_d, args.nclass)
+    geo_real = _id_panel(out_r, args.nclass)
+    # Mediator: ||Sigma_W(distilled) - Sigma_W(real)||_F on L2-normalized teacher features
+    # (the centered within-class covariance the Mahalanobis score reads / momentmatch matches;
+    # lower = the distilled set better reproduces the real class geometry).
+    Sd = within_class_cov(out_d["features"], out_d["labels"], args.nclass)
+    Sr = within_class_cov(out_r["features"], out_r["labels"], args.nclass)
+    geo_distilled["cov_gap_to_real"] = float(torch.linalg.norm(Sd - Sr).item())
+
+    # Feature "volume": participation-ratio effective rank of the within-class covariance,
+    # (tr Sigma)^2 / ||Sigma||_F^2 = (sum lambda)^2 / sum lambda^2 — how many directions the
+    # within-class variance spreads over. This is what covmatch's log-det maximization grows,
+    # and (unlike the NC1 trace) it distinguishes covmatch from momentmatch at equal NC1.
+    def _eff_rank(S):
+        fro2 = float((S * S).sum().item())
+        return float(torch.trace(S).item() ** 2 / fro2) if fro2 > 0 else float("nan")
+    geo_distilled["wcov_effrank"] = _eff_rank(Sd)
+    geo_real["wcov_effrank"] = _eff_rank(Sr)
 
     print("=> teacher reference: calibration + open-set on real val vs SVHN")
     val_loader = _loader(args.val_dir, args.val_ipc, args)
@@ -160,6 +184,11 @@ def main():
             f"{_fmt(m.get('auroc_msp')):>7s} {_fmt(m.get('fpr95_msp')):>7s}"
         )
     print("=" * len(hdr) + "\n")
+    print(
+        f"cov_gap(distilled vs real, normalized within-class Sigma) = "
+        f"{geo_distilled['cov_gap_to_real']:.4f}  |  wcov eff-rank: "
+        f"distilled={geo_distilled['wcov_effrank']:.2f} real={geo_real['wcov_effrank']:.2f}\n"
+    )
 
     # --- append to logs/diagnostics.jsonl ---
     os.makedirs(os.path.dirname(args.results_file) or ".", exist_ok=True)
@@ -173,6 +202,8 @@ def main():
         "mipc": args.mipc,
         "num_crop": args.num_crop,
         "seed": args.seed,
+        "select_method": args.select_method,
+        "exp_name": args.exp_name,
     }
     # Parallel diagnose.sh geom runs append concurrently; hold an exclusive lock
     # across the whole block so one run's rows can't interleave another's.

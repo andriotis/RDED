@@ -19,7 +19,7 @@ from collections import defaultdict
 
 import numpy as np
 
-METHOD_ORDER = ["stock", "random", "stratified", "covmatch"]
+METHOD_ORDER = ["stock", "random", "stratified", "covmatch", "momentmatch"]
 # (key in diag, label, direction: +1 = higher better, -1 = lower better)
 PANEL = [
     ("best_top1", "top1", +1),
@@ -36,7 +36,7 @@ PANEL = [
 
 
 def method_of(exp_name):
-    for m in ("covmatch", "stratified", "random"):
+    for m in ("covmatch", "stratified", "random", "momentmatch"):
         if f"_sel{m}" in (exp_name or ""):
             return m
     return "stock"
@@ -64,6 +64,14 @@ def main():
     rows = load(paths)
     if not rows:
         sys.exit(f"no usable rows in {paths}")
+    # Dedup (dataset,arch,ipc,method,seed) keeping the last occurrence — shards (e.g. the
+    # tiny/resnet18 _g*/_bf* files) sometimes log the same cell more than once, which would
+    # otherwise double-count into the per-seed mean/std.
+    dedup = {}
+    for r in rows:
+        key = (r["dataset"], r["arch"], r["ipc"], method_of(r.get("exp_name")), r.get("seed"))
+        dedup[key] = r
+    rows = list(dedup.values())
 
     # cell -> method -> metric -> [per-seed values]
     cells = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
