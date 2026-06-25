@@ -269,12 +269,63 @@ def _select_momentmatch(n, cand_feats, target_feats, mean_weight, gen):
     return torch.tensor(selected[:n], dtype=torch.long)
 
 
-def _select_variant(method, n, dist, feats, floor_mult, k, gen, mean_weight=1.0):
+def _select_qddpp(n, feats, qual_raw, beta, gen):
+    """v3: quality-diversity DPP — greedy log-det MAP of the L-ensemble
+
+        L = diag(q) (Z Z^T) diag(q),   q_i = exp(beta * r_i),   r = -standardize(qual_raw),
+
+    on L2-normalized features (same cosine kernel as _select_covmatch). The diversity term
+    Z Z^T is exactly covmatch's feature-volume objective (restores within-class variance /
+    NC1); the quality q is a *soft* replacement for the hard realism floor, up-weighting the
+    desirable crops (low `qual_raw`: high teacher confidence, or small margin in boundary
+    mode). beta is the single continuous knob between the two regimes:
+
+        beta -> 0    : q -> 1, L -> Z Z^T            => reproduces covmatch (pure volume)
+        beta -> inf  : quality dominates the log-det  => collapses onto the top-quality crops
+                       (= stock when qual_raw is the teacher CE loss)
+
+    so stock and covmatch are the endpoints of one method and intermediate beta *targets*
+    real within-class variance instead of overshooting it. Same Chen et al. (2018) fast
+    greedy as _select_covmatch, on L instead of K. Optimization-free, deterministic; `gen`
+    is unused (kept for a uniform variant signature).
+
+    feats [P, D]: realism-floored selection candidates' features.
+    qual_raw [P]: per-candidate "lower is better" score (teacher CE loss, or top1-top2 margin).
+    Returns n distinct LOCAL indices into feats.
+    """
+    n = min(n, feats.shape[0])
+    Z = F.normalize(feats.double(), dim=1)
+    P = Z.shape[0]
+    r = qual_raw.double()
+    r = -(r - r.mean()) / r.std().clamp_min(1e-12)         # high r <=> desirable (low qual_raw)
+    q = torch.exp(float(beta) * r)                          # [P] quality weights
+    L = (q.unsqueeze(1) * q.unsqueeze(0)) * (Z @ Z.t()) + 1e-4 * torch.eye(P, dtype=torch.float64)
+
+    cis = torch.zeros(n, P, dtype=torch.float64)
+    di2 = torch.diagonal(L).clone()
+    selected = [int(torch.argmax(di2))]
+    for it in range(1, n):
+        j = selected[-1]
+        if it == 1:
+            ei = L[j] / torch.sqrt(di2[j].clamp_min(1e-12))
+        else:
+            ei = (L[j] - cis[: it - 1].t() @ cis[: it - 1, j]) / torch.sqrt(di2[j].clamp_min(1e-12))
+        cis[it - 1] = ei
+        di2 = di2 - ei * ei
+        di2[selected] = -float("inf")
+        selected.append(int(torch.argmax(di2)))
+    return torch.tensor(selected[:n], dtype=torch.long)
+
+
+def _select_variant(method, n, dist, feats, floor_mult, k, gen, mean_weight=1.0,
+                    beta=0.0, qual_raw=None):
     """Pick n indices (into the per-class pool) by a variance-aware rule, on CPU tensors.
 
     `dist` [P] is the per-candidate teacher CE loss (realism); `feats` [P, D] the teacher
     penultimate features. All variants first restrict to the realism-floored pool; covmatch
     and momentmatch additionally read the *full* pool's feature geometry as their target.
+    `qual_raw` [P] is the qddpp quality score ("lower is better"; defaults to `dist`, i.e.
+    teacher confidence) and `beta` its quality<->diversity knob.
     """
     eligible = _realism_floor(dist, n, floor_mult)
     if eligible.numel() <= n:
@@ -292,18 +343,25 @@ def _select_variant(method, n, dist, feats, floor_mult, k, gen, mean_weight=1.0)
     if method == "momentmatch":
         local = _select_momentmatch(n, feats[eligible], feats, mean_weight, gen)
         return eligible[local]
+    if method == "qddpp":
+        qr = dist if qual_raw is None else qual_raw
+        local = _select_qddpp(n, feats[eligible], qr[eligible], beta, gen)
+        return eligible[local]
     raise ValueError(f"unknown --select-method: {method}")
 
 
 def selector(n, model, images, labels, size, m=5, method="stock",
-             floor_mult=3.0, k=8, rng_seed=0, mean_weight=1.0):
+             floor_mult=3.0, k=8, rng_seed=0, mean_weight=1.0,
+             beta=0.0, quality="confidence"):
     """Select n crops per class from the m-crop candidates.
 
     method="stock" reproduces RDED exactly: keep the most teacher-confident crop per image,
     then take the n globally-most-confident. The variance-aware methods (random/stratified/
-    covmatch/momentmatch) instead spread the selection across the class's within-class feature
-    spread, over a realism-floored pool, at the same n (= fixed IPC); momentmatch additionally
-    matches the full pool's mean+covariance (mean_weight scales the mean term).
+    covmatch/momentmatch/qddpp) instead spread the selection across the class's within-class
+    feature spread, over a realism-floored pool, at the same n (= fixed IPC); momentmatch
+    matches the full pool's mean+covariance (mean_weight scales the mean term); qddpp trades
+    feature volume against a quality score via `beta` (`quality`: "confidence" = teacher CE,
+    "margin" = top1-top2 logit gap, a boundary-seeking lever).
     """
     need_feats = method != "stock"
     with torch.no_grad():
@@ -333,11 +391,20 @@ def selector(n, model, images, labels, size, m=5, method="stock",
         if need_feats:
             feats = feats.reshape(m, s[0], feats.shape[1])[index, torch.arange(s[0])]
 
+        # qddpp's "margin" quality reads the best crop's top1-top2 logit gap (boundary lever);
+        # all other paths use teacher confidence (best_dist) as the quality / floor score.
+        qual_raw = best_dist
+        if method == "qddpp" and quality == "margin":
+            best_logits = preds.reshape(m, s[0], preds.shape[1])[index, torch.arange(s[0])]
+            top2 = best_logits.topk(2, dim=1).values
+            qual_raw = top2[:, 0] - top2[:, 1]
+
     if method == "stock":
         sel = torch.argsort(best_dist, descending=False)[:n]
     else:
         gen = torch.Generator().manual_seed(int(rng_seed))
-        sel = _select_variant(method, n, best_dist.cpu(), feats.cpu(), floor_mult, k, gen, mean_weight)
+        sel = _select_variant(method, n, best_dist.cpu(), feats.cpu(), floor_mult, k, gen,
+                              mean_weight, beta=beta, qual_raw=qual_raw.cpu())
 
     torch.cuda.empty_cache()
     return images[sel.to(images.device)].detach()

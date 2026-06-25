@@ -61,7 +61,7 @@ The single most useful table for "how is the intervention different from stock" 
 - $\phi(x)\in\mathbb R^{D}$ — **penultimate features** (the input to the final linear layer).
 - $z(x)\in\mathbb R^{K}$ — **logits**; $K$ classes; $\operatorname{softmax}(z)_k = e^{z_k}/\sum_j e^{z_j}$.
 - A model is either the **teacher** (pretrained on all real data) or the **student** (trained only on the distilled set).
-- **Open-set setup:** in-distribution (ID) inputs are the real validation set; OOD negatives are the **SVHN** test split. An **OOD score** $s(x)\in\mathbb R$ follows the convention **higher $\Rightarrow$ more in-distribution**.
+- **Open-set setup:** in-distribution (ID) inputs are the real validation set; OOD negatives come from a **far/near panel** — *far*: SVHN, MNIST, FashionMNIST (Places365 optional); *near*: CIFAR-10, DTD (STL-10 optional). Per-set metrics are logged under `diag.ood.<name>.*` (pass `--ood-sets`). An **OOD score** $s(x)\in\mathbb R$ follows the convention **higher $\Rightarrow$ more in-distribution**.
 
 ---
 
@@ -304,14 +304,56 @@ mutually dissimilar, which is exactly **increasing $\Sigma_W^{(S)}$**, i.e. driv
 $\mathrm{NC1}_{\text{distilled}}$ up toward the real value. Equivalently: *compose the per-class
 set to match the real within-class covariance.*
 
-### 5.6 What changes vs. stock, and the one nuance
+### 5.6 `qddpp` — one knob from `covmatch` to `stock` (and a near-OOD quality)
+
+`stock` and `covmatch` are the two extremes of a single objective. Put a **quality** weight
+$q_j>0$ on each candidate and maximize the log-determinant of the **quality-weighted** kernel — an
+**L-ensemble DPP** (Kulesza & Taskar 2012) — with the same greedy as §5.5:
+
+$$
+L_{ij} = q_i\,\langle\tilde\phi_i,\tilde\phi_j\rangle\,q_j,
+\qquad
+S = \arg\max_{S\subseteq P,\,|S|=n}\;\log\det\!\big(L_S + \epsilon I\big).
+$$
+
+Because $L_S = \operatorname{diag}(q_S)\,K_S\,\operatorname{diag}(q_S)$, the objective **separates**:
+
+$$
+\log\det L_S \;=\; 2\!\sum_{j\in S}\log q_j \;+\; \log\det K_S ,
+$$
+
+a **quality** term (favor high-$q$ crops) plus the **diversity / feature-volume** term `covmatch`
+maximizes (§5.5). Set the quality from a standardized per-crop score and a temperature $\beta$:
+
+$$
+q_j = \exp(\beta\, r_j),\qquad
+r_j = -\,\frac{\ell_j - \bar\ell}{\operatorname{std}(\ell)}\quad(\text{confidence}).
+$$
+
+- $\beta\to 0$: $q_j\to 1$, $L\to K$ $\Rightarrow$ **exactly `covmatch`** (pure volume).
+- $\beta\to\infty$: the quality term dominates $\Rightarrow$ the $n$ highest-$q$ (lowest-$\ell$) crops
+  $\Rightarrow$ **exactly `stock`**.
+
+So $\beta$ is a **single continuous dial** between the two endpoints, and the hard realism floor of
+§5.2 becomes a *soft* quality: intermediate $\beta$ can be tuned to land
+$\mathrm{NC1}_{\text{distilled}}/\mathrm{NC1}_{\text{real}}\approx 1$ — the "match, don't overshoot"
+target of §5.7 — rather than covmatch's overshoot. Selected with `--select-method qddpp --select-beta`.
+
+**Boundary quality (the near-OOD lever).** Replace the quality score with the teacher **margin**
+$m_j = z_{(1)} - z_{(2)}$ (top-1 minus top-2 logit), using $r_j=-\operatorname{standardize}(m_j)$ so
+*low-margin* (decision-boundary) crops are up-weighted (`--select-quality margin`). Where
+confidence-quality $+$ volume restores within-class *spread* (a **far**-OOD lever — over-dispersion
+blurs near-OOD), boundary-quality instead seeds the selection with crops near the class margin, the
+geometry **near**-OOD detection reads — targeting the one shift type variance restoration misses.
+
+### 5.7 What changes vs. stock, and the one nuance
 
 Only the index rule $S$ above changes; the teacher relabeling and the KD training are identical to
-stock (selected with `--select-method {stock,random,stratified,covmatch}`). **"Match, don't
-maximize":** `covmatch` maximizes volume, so it can **overshoot** real variance
+stock (selected with `--select-method {stock,random,stratified,covmatch,momentmatch,qddpp}`).
+**"Match, don't maximize":** `covmatch` maximizes volume, so it can **overshoot** real variance
 ($\mathrm{NC1}_{\text{distilled}}/\mathrm{NC1}_{\text{real}}>1$); empirically the best trust sits
-near a ratio of $1$, so $r$ and $k$ are knobs controlling *how much* variance is injected, and the
-target is to *match* real data, not to maximize spread.
+near a ratio of $1$, so $r$, $k$, and `qddpp`'s $\beta$ are knobs controlling *how much* variance is
+injected, and the target is to *match* real data, not to maximize spread.
 
 ---
 
@@ -330,6 +372,13 @@ predicts. Two honest boundaries: **IPC 1** cannot benefit (a single image per cl
 within-class variance to preserve), and **calibration** is largely fixable post-hoc by temperature
 scaling — so the genuine contribution is the **open-set / geometry** improvement, which TS cannot
 provide. Run `python tools/analyze_select.py` to see the full dose-response table.
+
+The dose `stock`<`random`<`covmatch` is three points on a continuum: `qddpp` (§5.6) makes the
+quality↔diversity trade-off a **single continuous knob** $\beta$ with `stock` ($\beta\to\infty$) and
+`covmatch` ($\beta=0$) as its endpoints, so the dose-response becomes a tunable frontier rather than
+a fixed ladder. The far/near split of the gain — variance restoration helps **far**-OOD (SVHN,
+MNIST, FashionMNIST) but not **near**-OOD (CIFAR-10, DTD) — motivates `qddpp`'s margin quality as the
+complementary near-OOD lever.
 
 ---
 

@@ -10,8 +10,10 @@ stock -> random -> covmatch (which raises nc1_distilled toward real)?
 Usage:
     python tools/analyze_select.py
     python tools/analyze_select.py logs/results_select_conv3.jsonl logs/results_select_conv4.jsonl
+    python tools/analyze_select.py --arch conv3 --dataset cifar10 --ipc 10
 """
 
+import argparse
 import glob
 import json
 import sys
@@ -59,11 +61,47 @@ def load(paths):
     return rows
 
 
+def parse_args():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*", help="results JSONL files (default: logs/results_select*.jsonl)")
+    ap.add_argument("--arch", action="append", help="keep only these archs (repeatable)")
+    ap.add_argument("--dataset", action="append", help="keep only these datasets (repeatable)")
+    ap.add_argument("--ipc", action="append", type=int, help="keep only these ipc values (repeatable)")
+    return ap.parse_args()
+
+
 def main():
-    paths = sys.argv[1:] or sorted(glob.glob("logs/results_select*.jsonl"))
+    args = parse_args()
+    paths = args.paths or sorted(glob.glob("logs/results_select*.jsonl"))
     rows = load(paths)
     if not rows:
         sys.exit(f"no usable rows in {paths}")
+
+    # Filter cells by the requested arch/dataset/ipc. If a value isn't present in the data,
+    # report it (it's "not implemented yet") so the user knows the filter matched nothing.
+    want_arch = set(args.arch) if args.arch else None
+    want_dataset = set(args.dataset) if args.dataset else None
+    want_ipc = set(args.ipc) if args.ipc else None
+    if want_arch is not None:
+        missing = want_arch - {r["arch"] for r in rows}
+        if missing:
+            print(f"# note: no rows for arch={sorted(missing)} — not implemented yet", file=sys.stderr)
+    if want_dataset is not None:
+        missing = want_dataset - {r["dataset"] for r in rows}
+        if missing:
+            print(f"# note: no rows for dataset={sorted(missing)} — not implemented yet", file=sys.stderr)
+    if want_ipc is not None:
+        missing = want_ipc - {r["ipc"] for r in rows}
+        if missing:
+            print(f"# note: no rows for ipc={sorted(missing)} — not implemented yet", file=sys.stderr)
+    rows = [
+        r for r in rows
+        if (want_arch is None or r["arch"] in want_arch)
+        and (want_dataset is None or r["dataset"] in want_dataset)
+        and (want_ipc is None or r["ipc"] in want_ipc)
+    ]
+    if not rows:
+        sys.exit("no rows match the requested --arch/--dataset/--ipc filters")
     # Dedup (dataset,arch,ipc,method,seed) keeping the last occurrence — shards (e.g. the
     # tiny/resnet18 _g*/_bf* files) sometimes log the same cell more than once, which would
     # otherwise double-count into the per-seed mean/std.

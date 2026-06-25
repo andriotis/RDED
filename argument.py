@@ -198,10 +198,12 @@ parser.add_argument(
     "--select-method",
     type=str,
     default="stock",
-    choices=["stock", "random", "stratified", "covmatch", "momentmatch"],
+    choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp"],
     help="crop selection: stock=top teacher-confidence (RDED); random/stratified/covmatch/"
          "momentmatch spread the selection across the class's feature spread at fixed IPC "
-         "(covmatch maximizes feature volume; momentmatch matches the pool mean+covariance)",
+         "(covmatch maximizes feature volume; momentmatch matches the pool mean+covariance); "
+         "qddpp = quality-diversity DPP that interpolates covmatch (--select-beta 0) and stock "
+         "(--select-beta large) with one knob",
 )
 parser.add_argument(
     "--select-realism-floor",
@@ -224,6 +226,25 @@ parser.add_argument(
     dest="momentmatch_mean_weight",
     help="lambda weighting the mean term vs the covariance term in --select-method "
          "momentmatch's objective ||Sigma_S - Sigma_t||_F^2 + lambda*||mu_S - mu_t||^2",
+)
+parser.add_argument(
+    "--select-beta",
+    type=float,
+    default=0.0,
+    dest="select_beta",
+    help="--select-method qddpp quality<->diversity knob: q_i = exp(beta * standardized "
+         "confidence). beta=0 reproduces covmatch (pure feature volume); large beta collapses "
+         "onto the top-quality crops (= stock when quality=confidence)",
+)
+parser.add_argument(
+    "--select-quality",
+    type=str,
+    default="confidence",
+    dest="select_quality",
+    choices=["confidence", "margin"],
+    help="--select-method qddpp quality score: confidence = teacher CE loss (far-OOD / "
+         "calibration lever); margin = top1-top2 logit gap, up-weighting boundary crops "
+         "(the near-OOD lever)",
 )
 parser.add_argument(
     "--synth-only",
@@ -422,6 +443,12 @@ args.exp_name = f"{args.subset}_{args.arch_name}_f{args.factor}_mipc{args.mipc}_
 # (and synth-cached) separately and never clobber or get falsely reused as the stock set.
 if getattr(args, "select_method", "stock") != "stock":
     args.exp_name += f"_sel{args.select_method}"
+    # qddpp is a one-knob family: each beta (and a non-default quality score) is a distinct
+    # distilled set, so path-key both to keep them separately synth-cached.
+    if args.select_method == "qddpp":
+        args.exp_name += f"_b{getattr(args, 'select_beta', 0.0):g}"
+        if getattr(args, "select_quality", "confidence") != "confidence":
+            args.exp_name += f"_q{args.select_quality}"
     # Path-key a non-default realism floor too, so floor variants of a selector are stored
     # (and synth-cached) separately and never clobber the floor=3.0 baseline set.
     _fl = getattr(args, "select_realism_floor", 3.0)

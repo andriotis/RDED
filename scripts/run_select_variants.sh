@@ -35,6 +35,9 @@ RESULTS_FILE="${RESULTS_FILE:-logs/results_select.jsonl}"
 REALISM_FLOOR="${REALISM_FLOOR:-3.0}"; SELECT_K="${SELECT_K:-8}"; FIT_IPC="${FIT_IPC:-50}"
 OOD_SETS="${OOD_SETS:-svhn}"          # comma list; svhn,dtd,cifar10 for the multi-OOD panel
 SAVE_STUDENT="${SAVE_STUDENT:-0}"     # 1 = persist student ckpt for --diagnostics-only re-eval
+SELECT_BETA="${SELECT_BETA:-0.0}"     # qddpp quality<->diversity knob (one value/invocation; sweep by
+                                      # launching several instances with different SELECT_BETA per GPU)
+SELECT_QUALITY="${SELECT_QUALITY:-confidence}"   # qddpp quality score: confidence (far-OOD) | margin (near-OOD)
 DRY_RUN="${DRY_RUN:-0}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -56,11 +59,17 @@ for method in $METHODS; do
           --diagnostics --ood-sets "$OOD_SETS"
           --results-file "$RESULTS_FILE" --disable-aim
         )
+        # qddpp needs its one-knob params; tag run-log/cache by them (matches argument.py exp_name).
+        qtag=""
+        if [[ "$method" == "qddpp" ]]; then
+          args+=(--select-beta "$SELECT_BETA" --select-quality "$SELECT_QUALITY")
+          qtag="_b${SELECT_BETA}"; [[ "$SELECT_QUALITY" != "confidence" ]] && qtag="${qtag}_q${SELECT_QUALITY}"
+        fi
         [[ "$SAVE_STUDENT" == "1" ]] && args+=(--save-student)
         # Reuse an existing seed-scoped distilled set when present (synthesis is deterministic
         # per seed, so the cached set is identical). Stock always reuses; other methods reuse
         # only when SKIP_SYNTH=1 (e.g. a multi-OOD / checkpoint backfill that must not re-synth).
-        tag=""; [[ "$method" != "stock" ]] && tag="_sel${method}"
+        tag=""; [[ "$method" != "stock" ]] && tag="_sel${method}${qtag}"
         seed_dir="./exp/${dataset}_${arch}_f${FACTOR}_mipc${MIPC}_ipc${ipc}_cr${NUM_CROP}${tag}/syn_data_seed${seed}"
         if [[ -d "$seed_dir" ]] && { [[ "$method" == "stock" ]] || [[ "${SKIP_SYNTH:-0}" == "1" ]]; }; then
           args+=(--skip-synth)
@@ -69,7 +78,7 @@ for method in $METHODS; do
         if [[ "$DRY_RUN" == "1" ]]; then
           echo "    python ./main.py ${args[*]}"
         else
-          python ./main.py "${args[@]}" > "logs/runs/select_${method}_${dataset}_${arch}_ipc${ipc}_seed${seed}.log" 2>&1 \
+          python ./main.py "${args[@]}" > "logs/runs/select_${method}${qtag}_${dataset}_${arch}_ipc${ipc}_seed${seed}.log" 2>&1 \
             || echo "    !! FAILED (see log)"
         fi
       done

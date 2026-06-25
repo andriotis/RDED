@@ -23,8 +23,11 @@ is unchanged, which is what makes any trust change *causally* attributable to th
   the operative principle is *maximize* variance, not *match* it.
 - The realism floor is a **causal variance dial**: opening it overshoots real variance and trades ~4 top-1
   pts for big far-OOD + calibration gains.
-- **Key boundary:** the OOD gain is **far-OOD (SVHN)-specific** — it does **not** transfer to near-OOD
-  textures (DTD). Only the calibration gain is OOD-type-robust.
+- **Key boundary:** the OOD gain is **far-OOD-specific** — confirmed: covmatch lifts Maha-AUROC on SVHN
+  *and* MNIST/FashionMNIST, but is flat on near-OOD CIFAR-10/DTD (§2.6). Only the calibration gain is
+  OOD-type-robust.
+- **Extension (in progress):** a single-knob unifying selector (`qddpp`, with stock and covmatch as its
+  β-endpoints) and a near-OOD **margin**-quality lever — see §5.
 
 **Where to look.** Results live in `logs/*.jsonl` (one row per run; `r["diag"]` holds the trust panel,
 `r["diag"]["ood"][set]` the per-OOD metrics). Analysis is `tools/analyze_*.py`; geometry is
@@ -162,8 +165,21 @@ covariance inflates the class-conditional Gaussian, which separates *distant* OO
 near-OOD** (textures/natural images overlap the now-wider ID manifold). Variance restoration is a far-OOD
 lever.
 
+**Far-OOD replication (not SVHN per se).** Re-scoring the IPC=10 stock/covmatch checkpoints (training-free,
+`--diagnostics-only`) on two *additional* far-OOD sets — **MNIST** and **FashionMNIST** (grayscale,
+modality-far) — reproduces the SVHN pattern. Mean Δ(cov − stock) Mahalanobis-AUROC over the three
+non-ceiling cells (tiny/resnet18 excluded, already ≥0.95):
+
+| Maha-AUROC | MNIST (far) | FashionMNIST (far) | SVHN (far) | CIFAR-10 (near) | DTD (near) |
+|---|---|---|---|---|---|
+| mean Δ(cov − stock) | **+0.106** | **+0.082** | **+0.085** | +0.013 | −0.006 |
+
+covmatch lifts *every* far-OOD set and is ~flat on *near*-OOD — so the benefit tracks the **far/near axis**,
+not SVHN specifically. (Per-cell rows: `tools/analyze_multiood.py logs/results_farnear_g*.jsonl`.)
+
 **Defensible headline:** *variance-aware distillation selection improves model calibration (robustly) and
-far-OOD detection (at zero accuracy cost); the OOD benefit is shift-type-specific.*
+far-OOD detection (at zero accuracy cost); the OOD benefit is far-vs-near-shift-specific (confirmed across
+SVHN/MNIST/FashionMNIST vs CIFAR-10/DTD), not dataset-specific.*
 
 ### 2.7 What covmatch is, and is not
 **Is:** a drop-in stage-1 selector that restores within-class feature variance via log-det (volume)
@@ -211,8 +227,10 @@ SAVE_STUDENT OOD_SETS SKIP_SYNTH RESULTS_FILE CUDA_VISIBLE_DEVICES`), `scripts/r
 ---
 
 ## 4. Limitations & open questions
-1. **Confirm the far-vs-near axis (free):** score more *far*-OOD sets (Places/LSUN) via `--diagnostics-only`
-   on the existing checkpoints — establish the benefit is far-vs-near, not SVHN-specific per se.
+1. **Far-vs-near axis — RESOLVED (§2.6).** Scored MNIST + FashionMNIST (far) alongside SVHN, and re-confirmed
+   CIFAR-10/DTD (near), via `--diagnostics-only` on the existing checkpoints. covmatch lifts Maha-AUROC on
+   all far sets (3/4 cells; 4th at ceiling) and is flat on near sets ⇒ the benefit is far-vs-near, not
+   SVHN-specific. (Places365/STL-10 are wired in `_ood_base_dataset` for an optional further check.)
 2. **The momentmatch puzzle (§2.4):** equal aggregate geometry, different student OOD — the selection's
    effect is not fully captured by distilled-set NC1/eff-rank.
 3. **Calibration is the most robust claim** (4/4, OOD-independent); the OOD claim must be stated as *far*-OOD.
@@ -221,11 +239,39 @@ SAVE_STUDENT OOD_SETS SKIP_SYNTH RESULTS_FILE CUDA_VISIBLE_DEVICES`), `scripts/r
 
 ---
 
+## 5. Extension (in progress): the `qddpp` unifying selector and the near-OOD lever
+The settled study varies a *family* of selectors; the extension (June 2026) folds them into one method with
+an interpretable knob. Full mathematics: `docs/EXPERIMENTS.md` §5.6.
+
+**`qddpp` (quality–diversity DPP).** Per class, select the size-$n$ subset maximizing the log-det of a
+*quality-weighted* cosine kernel $L=\operatorname{diag}(q)\,K\,\operatorname{diag}(q)$, with quality
+$q_j=\exp(\beta r_j)$ and $r_j$ the standardized teacher confidence. Since
+$\log\det L_S = 2\sum_{j\in S}\log q_j + \log\det K_S$, $\beta$ trades **quality** against **feature volume**:
+- $\beta=0 \Rightarrow L=K \Rightarrow$ **bit-exactly `covmatch`** (verified, no-train check);
+- $\beta\to\infty \Rightarrow$ the top-$n$ most-confident crops $\Rightarrow$ **`stock`**.
+
+So stock and covmatch are the **endpoints of one continuous knob**, and the hard realism floor (§2.5 — "not a
+smooth dial but a distinct operating point") becomes a *soft* quality whose $\beta$ can **target**
+$\mathrm{NC1}/\mathrm{NC1}_{\text{real}}\approx 1$ instead of overshooting. *Status:* the accuracy↔trust↔NC1
+β-sweep frontier (tiny/conv4, IPC=10) is running; results pending.
+
+**Boundary quality (near-OOD lever).** §2.6 showed variance restoration is *far*-OOD-specific (over-dispersing
+the within-class Gaussian blurs *near*-OOD). `qddpp` can instead read the teacher **margin**
+$z_{(1)}-z_{(2)}$ (`--select-quality margin`), up-weighting decision-boundary crops — a candidate *near*-OOD
+lever, completing a **volume → far / boundary → near** picture. *Status:* under test.
+
+**Code / flags.** Selector `synthesize/utils.py::_select_qddpp`; flags
+`--select-method qddpp --select-beta <β> --select-quality {confidence,margin}`; path-keyed
+`_selqddpp_b<β>[_q<quality>]`. Far/near OOD panel extended in `validation/diagnostics.py::_ood_base_dataset`.
+
+---
+
 ## Appendix A — configuration
 CIFAR-100 (`conv3`, `resnet18_modified`) + Tiny-ImageNet (`conv4`, `resnet18_modified`); teacher = student;
 `mipc=300`, `num_crop=5`, `factor=1`, IPC ∈ {1, 10, 50}, seeds {42, 43, 44}, 300 student epochs. Mahalanobis
 class statistics and the calibration temperature are fit on a held-out real-train slice (`fit_ipc=50`).
-OOD sets: SVHN / DTD / CIFAR-10 (10k-sample cap). covmatch default realism floor = 3.
+OOD sets (10k-sample cap): **far** — SVHN, MNIST, FashionMNIST (Places365 optional); **near** — CIFAR-10, DTD
+(STL-10 optional). covmatch default realism floor = 3.
 
 ## Appendix B — full IPC×cell Mahalanobis-AUROC (stock / random / covmatch)
 | cell | IPC=1 | IPC=10 | IPC=50 |

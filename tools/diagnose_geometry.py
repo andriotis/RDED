@@ -63,11 +63,16 @@ def build_args():
                         "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
     p.add_argument("--select-method", type=str, default="stock",
-                   choices=["stock", "random", "stratified", "covmatch", "momentmatch"],
+                   choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp"],
                    help="inspect a variance-aware distilled set (tags exp_name with _sel<method>, "
                         "matching argument.py); 'stock' is the plain RDED set")
     p.add_argument("--select-realism-floor", type=float, default=3.0, dest="select_realism_floor",
                    help="must match the synthesized set's floor; path-keyed as _fl<F> when != 3.0")
+    p.add_argument("--select-beta", type=float, default=0.0, dest="select_beta",
+                   help="qddpp beta (path-keyed _b<beta>, matching argument.py)")
+    p.add_argument("--select-quality", type=str, default="confidence",
+                   choices=["confidence", "margin"], dest="select_quality",
+                   help="qddpp quality score (path-keyed _q<quality> when != confidence)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--re-batch-size", type=int, default=256)
@@ -86,6 +91,10 @@ def build_args():
     )
     if args.select_method != "stock":
         args.exp_name += f"_sel{args.select_method}"
+        if args.select_method == "qddpp":
+            args.exp_name += f"_b{args.select_beta:g}"
+            if args.select_quality != "confidence":
+                args.exp_name += f"_q{args.select_quality}"
         if abs(args.select_realism_floor - 3.0) > 1e-9:
             args.exp_name += f"_fl{args.select_realism_floor:g}"
     args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"

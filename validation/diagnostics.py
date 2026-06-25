@@ -318,18 +318,43 @@ class _LabeledWrapper(torch.utils.data.Dataset):
 
 
 def _ood_base_dataset(name, root):
-    """Return the raw (PIL, label) OOD test dataset by name, downloading to `root`."""
+    """Return the raw (PIL, label) OOD test dataset by name, downloading to `root`.
+
+    Sets are grouped along the far/near axis the study reports:
+      far  — semantically/modally distant from CIFAR/Tiny natural objects: svhn (digits),
+             mnist / fashionmnist (grayscale), places365 (scenes).
+      near — natural images / textures overlapping the ID manifold: cifar10, dtd, stl10.
+    Each is constructed (and downloaded) only when requested in --ood-sets, so the heavier
+    sets (places365 ~2GB, stl10 ~2.5GB) cost nothing unless asked for.
+    """
     import torchvision.datasets as datasets
+    import torchvision.transforms as T
+
+    # Grayscale sets must become 3-channel PIL before the shared 3-channel eval_transform.
+    gray3 = T.Grayscale(num_output_channels=3)
 
     if name == "svhn":
-        return datasets.SVHN(root=root, split="test", download=True)
+        return datasets.SVHN(root=root, split="test", download=True)              # far
+    if name == "mnist":
+        return datasets.MNIST(root=root, train=False, download=True, transform=gray3)        # far
+    if name == "fashionmnist":
+        return datasets.FashionMNIST(root=root, train=False, download=True, transform=gray3)  # far
+    if name == "places365":
+        # far-OOD scenes; small (256px) validation split (~2GB on first use).
+        return datasets.Places365(root=root, split="val", small=True, download=True)
     if name == "cifar10":
-        # Near-OOD for CIFAR-100 (natural images, disjoint classes).
+        # near-OOD for CIFAR-100 (natural images, disjoint classes).
         return datasets.CIFAR10(root=root, train=False, download=True)
+    if name == "stl10":
+        # near-OOD natural images (classes overlap CIFAR); ~2.5GB on first use.
+        return datasets.STL10(root=root, split="test", download=True)
     if name == "dtd":
-        # Describable Textures — far-OOD textures (torchvision >= 0.13).
+        # Describable Textures — near-OOD textures (torchvision >= 0.13).
         return datasets.DTD(root=root, split="test", download=True)
-    raise ValueError(f"unknown OOD set '{name}' (known: svhn, cifar10, dtd)")
+    raise ValueError(
+        f"unknown OOD set '{name}' "
+        "(known far: svhn, mnist, fashionmnist, places365; near: cifar10, stl10, dtd)"
+    )
 
 
 def build_ood_loader(name, args, max_samples=10000):

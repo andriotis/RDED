@@ -60,6 +60,8 @@ def init_images(args, model=None):
             k=getattr(args, "select_k", 8),
             rng_seed=args.seed * 100003 + c,
             mean_weight=getattr(args, "momentmatch_mean_weight", 1.0),
+            beta=getattr(args, "select_beta", 0.0),
+            quality=getattr(args, "select_quality", "confidence"),
         )
         images = mix_images(images, args.input_size, args.factor, args.ipc)
         save_images(args, denormalize(images), c)
