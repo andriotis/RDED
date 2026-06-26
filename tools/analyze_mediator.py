@@ -28,7 +28,7 @@ import numpy as np
 
 
 def method_of(exp_name):
-    for m in ("covmatch", "stratified", "random", "momentmatch"):
+    for m in ("covmatch", "stratified", "random", "momentmatch", "relmatch"):
         if exp_name and f"_sel{m}" in exp_name:
             return m
     return "stock"

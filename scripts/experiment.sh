@@ -20,7 +20,15 @@
 #                                          (passed through to main.py; default empty)
 #   --gce-q <float>                      q for the GCE term (default 0.7; recorded + keyed when gce active)
 #   --skip-synth                         pass --skip-synth to main.py (paired protocol)
-#   --resume                             skip if a matching row is already in logs/results.jsonl
+#   --select-method <name>               stage-1 selector: stock|random|stratified|covmatch|momentmatch|qddpp|relmatch
+#   --select-realism-floor <float>       eligible-pool multiplier for variance-aware selectors (default 3.0)
+#   --select-k|--select-beta|--select-quality   stratified clusters / qddpp beta / qddpp quality (confidence|margin)
+#   --momentmatch-mean-weight <float>    momentmatch mean-vs-covariance weight
+#   --relmatch-diag-weight <float>       relmatch self-class weight (0 = off-diagonal / inter-class match)
+#   --diagnostics                        log the trust panel (ECE/OOD/AUROC/NC), not just accuracy
+#   --ood-sets <csv> | --fit-ipc <int>   diagnostics OOD sets and Mahalanobis/temperature fit budget
+#   --results-file <path>                results JSONL (default logs/results.jsonl; --resume reads this too)
+#   --resume                             skip if a matching row is already in the results file
 #   --dry-run                            print the python command, don't execute
 #   -h, --help                           show this help
 
@@ -43,11 +51,22 @@ RESUME=0
 DRY_RUN=0
 SWEEP_NAME=""
 CELL_ID=""
+SELECT_METHOD=""
+SELECT_REALISM_FLOOR=""
+SELECT_K=""
+SELECT_BETA=""
+SELECT_QUALITY=""
+MOMENTMATCH_MEAN_WEIGHT=""
+RELMATCH_DIAG_WEIGHT=""
+DIAGNOSTICS=0
+OOD_SETS=""
+FIT_IPC=""
+RESULTS_FILE=""
 WEIGHTS_ARGS=()        # --w-<name> <val> pairs, verbatim passthrough to main.py
 USER_WEIGHTS_JSON="{}"  # collected user-set weights as JSON, used by resume key and log filename
 
 usage() {
-  sed -n '2,25p' "$0"
+  sed -n '2,33p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -68,6 +87,17 @@ while [[ $# -gt 0 ]]; do
     --dry-run)    DRY_RUN=1; shift ;;
     --sweep-name) shift; SWEEP_NAME="$1"; shift ;;
     --cell-id)    shift; CELL_ID="$1"; shift ;;
+    --select-method)           shift; SELECT_METHOD="$1"; shift ;;
+    --select-realism-floor)    shift; SELECT_REALISM_FLOOR="$1"; shift ;;
+    --select-k)                shift; SELECT_K="$1"; shift ;;
+    --select-beta)             shift; SELECT_BETA="$1"; shift ;;
+    --select-quality)          shift; SELECT_QUALITY="$1"; shift ;;
+    --momentmatch-mean-weight) shift; MOMENTMATCH_MEAN_WEIGHT="$1"; shift ;;
+    --relmatch-diag-weight)    shift; RELMATCH_DIAG_WEIGHT="$1"; shift ;;
+    --diagnostics)             DIAGNOSTICS=1; shift ;;
+    --ood-sets)                shift; OOD_SETS="$1"; shift ;;
+    --fit-ipc)                 shift; FIT_IPC="$1"; shift ;;
+    --results-file)            shift; RESULTS_FILE="$1"; shift ;;
     -h|--help)    usage; exit 0 ;;
     --w-*)
       flag="$1"
@@ -122,6 +152,32 @@ esac
 
 mkdir -p logs/runs
 
+RESULTS_FILE_EFF="${RESULTS_FILE:-logs/results.jsonl}"
+
+# Stage-1 selector exp_name suffix — MUST mirror argument.py's exp_name construction so the per-cell
+# run-log name and the --resume key track the path-keyed distilled set (empty for stock/unset).
+SEL_SUFFIX=$(SM="$SELECT_METHOD" SB="${SELECT_BETA:-0.0}" SQ="${SELECT_QUALITY:-confidence}" \
+             DW="${RELMATCH_DIAG_WEIGHT:-0.0}" FL="${SELECT_REALISM_FLOOR:-3.0}" python - <<'PY'
+import os
+sm = os.environ.get("SM") or "stock"
+suf = ""
+if sm != "stock":
+    suf = f"_sel{sm}"
+    if sm == "qddpp":
+        suf += f"_b{float(os.environ['SB']):g}"
+        if os.environ.get("SQ", "confidence") != "confidence":
+            suf += f"_q{os.environ['SQ']}"
+    if sm == "relmatch":
+        dw = float(os.environ.get("DW", "0") or 0)
+        if abs(dw) > 1e-9:
+            suf += f"_dw{dw:g}"
+    fl = float(os.environ.get("FL", "3.0") or 3.0)
+    if abs(fl - 3.0) > 1e-9:
+        suf += f"_fl{fl:g}"
+print(suf)
+PY
+)
+
 # Resolve canonical weights = LOSS_REGISTRY defaults overridden by user-set values.
 # WEIGHTS_TAG is a stable filename slug (e.g. "kl1p0_ockl0p3") of nonzero weights.
 # EXTRA_TAG slugs the non-weight hyperparams that distinguish a cell (gce_q when
@@ -143,8 +199,8 @@ print(tag, ("_".join(extras) or "-"), json.dumps(canon, sort_keys=True))
 PY
 )
 
-if [[ $RESUME -eq 1 && -f logs/results.jsonl ]]; then
-  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" GCE_Q="$GCE_Q" python - <<'PY'
+if [[ $RESUME -eq 1 && -f "$RESULTS_FILE_EFF" ]]; then
+  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" GCE_Q="$GCE_Q" SEL_SUFFIX="$SEL_SUFFIX" RESULTS_FILE_EFF="$RESULTS_FILE_EFF" python - <<'PY'
 import json, os
 canon = json.loads(os.environ["CANON_JSON"])
 
@@ -157,13 +213,19 @@ def extras(weights, gce_q):
     return tuple(items)
 
 new_q = os.environ.get("GCE_Q") or None
+
+def sel_suffix_of(exp_name):
+    i = (exp_name or "").find("_sel")
+    return exp_name[i:] if i >= 0 else ""
+
 key = (
     os.environ["DATASET"], os.environ["ARCH"], os.environ["STUD"],
     int(os.environ["IPC"]), int(os.environ["SEED"]),
     tuple(sorted(canon.items())),
     extras(canon, new_q),
+    os.environ.get("SEL_SUFFIX", ""),
 )
-with open("logs/results.jsonl") as f:
+with open(os.environ["RESULTS_FILE_EFF"]) as f:
     for line in f:
         line = line.strip()
         if not line:
@@ -182,6 +244,7 @@ with open("logs/results.jsonl") as f:
             r.get("ipc"), r.get("seed"),
             tuple(sorted((k, float(v)) for k, v in w.items())),
             extras(w, r.get("gce_q")),
+            sel_suffix_of(r.get("exp_name")),
         )
         if rk == key:
             print("MATCH")
@@ -189,14 +252,16 @@ with open("logs/results.jsonl") as f:
 PY
 )
   if [[ "$found" == "MATCH" ]]; then
-    echo "[skip] dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED weights=$CANON_JSON (already in results.jsonl)"
+    echo "[skip] dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED method=${SELECT_METHOD:-stock} weights=$CANON_JSON (already in $RESULTS_FILE_EFF)"
     exit 0
   fi
 fi
 
-# Fold the extras slug into filename + run tag so gce_q variants don't collide.
+# Fold the extras + selector slugs into filename + run tag so gce_q AND selector variants
+# (e.g. stock vs relmatch at the same dataset/arch/ipc/seed/weights) get distinct logs/run-tags.
 EXTRA_SLUG=""
 [[ "$EXTRA_TAG" != "-" ]] && EXTRA_SLUG="_${EXTRA_TAG}"
+EXTRA_SLUG="${EXTRA_SLUG}${SEL_SUFFIX}"
 log="logs/runs/${DATASET}_${ARCH}_to_${STUD_ARCH}_ipc${IPC}_seed${SEED}_w${WEIGHTS_TAG}${EXTRA_SLUG}.log"
 
 RUN_TAG="seed${SEED}_w${WEIGHTS_TAG}${EXTRA_SLUG}"
@@ -233,6 +298,20 @@ if [[ -n "$GCE_Q" ]]; then
   py_args+=(--gce-q "$GCE_Q")
 fi
 [[ $SKIP_SYNTH -eq 1 ]] && py_args+=(--skip-synth)
+
+# Stage-1 selector + trustworthiness-diagnostics passthrough (all opt-in; absent => stock RDED
+# with no diagnostics, i.e. identical to a plain loss-term sweep).
+[[ -n "$SELECT_METHOD" ]]            && py_args+=(--select-method "$SELECT_METHOD")
+[[ -n "$SELECT_REALISM_FLOOR" ]]    && py_args+=(--select-realism-floor "$SELECT_REALISM_FLOOR")
+[[ -n "$SELECT_K" ]]                && py_args+=(--select-k "$SELECT_K")
+[[ -n "$SELECT_BETA" ]]             && py_args+=(--select-beta "$SELECT_BETA")
+[[ -n "$SELECT_QUALITY" ]]          && py_args+=(--select-quality "$SELECT_QUALITY")
+[[ -n "$MOMENTMATCH_MEAN_WEIGHT" ]] && py_args+=(--momentmatch-mean-weight "$MOMENTMATCH_MEAN_WEIGHT")
+[[ -n "$RELMATCH_DIAG_WEIGHT" ]]    && py_args+=(--relmatch-diag-weight "$RELMATCH_DIAG_WEIGHT")
+[[ $DIAGNOSTICS -eq 1 ]]            && py_args+=(--diagnostics)
+[[ -n "$OOD_SETS" ]]                && py_args+=(--ood-sets "$OOD_SETS")
+[[ -n "$FIT_IPC" ]]                 && py_args+=(--fit-ipc "$FIT_IPC")
+[[ -n "$RESULTS_FILE" ]]            && py_args+=(--results-file "$RESULTS_FILE")
 
 export PYTHONHASHSEED="$SEED"
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"

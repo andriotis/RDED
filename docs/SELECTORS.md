@@ -23,7 +23,8 @@ budget** — same for every method). **Stock** keeps the `n` most teacher-confid
 all near the class mean → over-collapsed. The **variance-aware** methods instead first build a
 *realism-floored pool* of the most-confident `⌈r·n⌉` crops, then choose `n` from that pool to
 **spread out** in feature space — recovering the within-class variance stock discards, at no change
-to the budget.
+to the budget. (One variant, **`relmatch`** (§8), is the exception: it works in *soft-label* space,
+preserving *between*-class structure — the class-relation matrix — instead of within-class spread.)
 
 ---
 
@@ -35,8 +36,8 @@ to its single best crop, then dispatches to either the stock path or a variance-
 ```python
 def selector(n, model, images, labels, size, m=5, method="stock",
              floor_mult=3.0, k=8, rng_seed=0, mean_weight=1.0,
-             beta=0.0, quality="confidence"):
-    need_feats = method != "stock"            # stock needs only logits → byte-identical to RDED
+             beta=0.0, quality="confidence", diag_weight=0.0):
+    need_feats = method not in ("stock", "relmatch")   # stock & relmatch use logits/soft-labels only
     with torch.no_grad():
         images = images.cuda()
         s = images.shape                       # [mipc, m, C, H, W]
@@ -61,9 +62,11 @@ def selector(n, model, images, labels, size, m=5, method="stock",
 
 Two things to notice:
 
-- **`need_feats = method != "stock"`** — the stock path never extracts penultimate features, so it
-  reproduces RDED *exactly*. Features are only captured (via a forward hook on the last linear layer,
-  see `_forward_logits_feats`) when a variance-aware method asks for them.
+- **`need_feats = method not in ("stock", "relmatch")`** — the stock path never extracts penultimate
+  features, so it reproduces RDED *exactly*. Features are only captured (via a forward hook on the last
+  linear layer, see `_forward_logits_feats`) when a variance-aware method asks for them. `relmatch` is
+  the lone exception among the variants: it works from the teacher's **soft labels** (already in the
+  logits), so it too skips the feature hook.
 - **The inner `argmin`** — before *any* selection, each source image is collapsed to its single
   most-confident crop (`index = torch.argmin(dist, 0)`). So selection always operates on one
   representative crop per source image; `best_dist` is that crop's teacher CE loss.
@@ -325,11 +328,85 @@ shift type variance restoration misses.
 
 ---
 
-## 8. The dispatch table, in one place
+## 8. `relmatch` — match the class-relation matrix in soft-label space (`_select_relmatch`)
+
+Every method above works in **feature** space and targets *within-class* geometry (how spread out a
+class is). `relmatch` is the odd one out on both counts: it works in **soft-label** space and targets
+*between-class* geometry — **how each class relates to all the others**.
+
+The teacher's softmax over all `K` classes is a crop's *soft label*; its **off-diagonal** mass is dark
+knowledge ("this cat also looks 22% like a dog"). Average the soft labels over a whole class and you
+get one row of the **class-relation matrix**, `R[i,:]` — the dataset's inter-class fingerprint. `stock`
+keeps the most-confident crops and flattens that fingerprint; `relmatch` keeps the subset whose **mean
+soft label** reproduces it, i.e. it drives the distilled set's `R̂[i,:]` toward `R[i,:]`.
+
+Mechanically it is `momentmatch`'s *mean* term moved from feature space into probability space (and
+with no L2-normalization — soft labels already live on the simplex):
+
+```python
+def _select_relmatch(n, cand_probs, target_row, diag_weight, diag_idx, gen):
+    n  = min(n, cand_probs.shape[0])
+    Pc = cand_probs.double()                               # [P, K] candidates' soft labels (floored pool)
+    P, K = Pc.shape
+    r = target_row.double()                                # [K] target row  r = R[i,:]
+    w = torch.ones(K, dtype=torch.float64)
+    w[int(diag_idx)] = float(diag_weight)                  # self-class column weight (0 ⇒ off-diagonal only)
+
+    s1 = torch.zeros(K, dtype=torch.float64)               # running SUM of selected soft labels
+    avail = torch.ones(P, dtype=torch.bool)
+    selected = []
+    for step in range(1, n + 1):
+        k    = float(step)
+        mean = (s1.unsqueeze(0) + Pc) / k                  # [P, K] mean if we added each candidate
+        diff = mean - r.unsqueeze(0)
+        J    = ((diff * diff) * w.unsqueeze(0)).sum(dim=1) # weighted squared error  ‖w ⊙ (r̂ − r)‖²
+        J[~avail] = float("inf")
+        j = int(torch.argmin(J))                           # add the crop that pulls the mean toward r
+        selected.append(j); avail[j] = False
+        s1 += Pc[j]                                        # rank-1 update: just add its soft label
+    return torch.tensor(selected[:n], dtype=torch.long)
+```
+
+The objective is simply `J(S) = ‖w ⊙ (r̂(S) − r)‖²` with `r̂(S) = (1/|S|) Σ_{s∈S} p_s` the selected
+crops' mean soft label — the same greedy "add the candidate that pulls the running mean toward the
+target" as `momentmatch`, but mean-only. The dispatcher feeds it the soft labels and the **full pool's**
+mean as the target (like `momentmatch`, the target is the full pool, not the floored candidates):
+
+```python
+    if method == "relmatch":                               # soft-label space, not feats
+        return eligible[_select_relmatch(n, probs[eligible], probs.mean(0), diag_weight, diag_idx, gen)]
+```
+
+**The knob — `--relmatch-diag-weight` (default `0`).** `w` is all-ones except on the self-class column
+`diag_idx`, where it is `diag_weight`. At the default **`0`** that column is dropped, so the match is
+**off-diagonal only** — pure inter-class structure. Why that default: the diagonal self-confidence is
+large and swings a lot, so at full weight it dominates the squared error and the match degenerates into
+"reproduce the confidence distribution," drowning out the faint relational signal. Set it to `1` to
+match the literal full row `R[i,:]`.
+
+**Where `probs` comes from.** `relmatch` is the one variant that needs **soft labels, not penultimate
+features** — so `need_feats` is false for it (§1) and `selector(...)` just softmaxes the already-gathered
+best-crop logits:
+
+```python
+    probs = F.softmax(best_logits, dim=1) if method == "relmatch" else None
+```
+
+**Why it matters.** The off-diagonal of `R` *is* boundary geometry — which classes sit near which — and
+that is exactly what calibration, OOD detection, and robustness read, and exactly what confidence-greedy
+`stock` discards. A from-scratch, beginner-level walkthrough with a worked 3-class example lives in
+[`RELMATCH_EXPLAINED.md`](RELMATCH_EXPLAINED.md); the matrix is measured by `class_relation_matrix` /
+`relation_divergence` in [`validation/diagnostics.py`](../validation/diagnostics.py) and reported by
+`tools/diagnose_geometry.py` (`rel_frob`, `rel_frob_offdiag`, `rel_row_cos_offdiag`, `rel_eig_overlap`).
+
+---
+
+## 9. The dispatch table, in one place
 
 ```python
 def _select_variant(method, n, dist, feats, floor_mult, k, gen,
-                    mean_weight=1.0, beta=0.0, qual_raw=None):
+                    mean_weight=1.0, beta=0.0, qual_raw=None,
+                    probs=None, diag_weight=0.0, diag_idx=None):
     eligible = _realism_floor(dist, n, floor_mult)         # shared guard
     if eligible.numel() <= n:
         return eligible[:n]
@@ -346,6 +423,8 @@ def _select_variant(method, n, dist, feats, floor_mult, k, gen,
     if method == "qddpp":
         qr = dist if qual_raw is None else qual_raw
         return eligible[_select_qddpp(n, feats[eligible], qr[eligible], beta, gen)]
+    if method == "relmatch":                               # soft labels, not feats
+        return eligible[_select_relmatch(n, probs[eligible], probs.mean(0), diag_weight, diag_idx, gen)]
     raise ValueError(f"unknown --select-method: {method}")
 ```
 
@@ -357,10 +436,11 @@ def _select_variant(method, n, dist, feats, floor_mult, k, gen,
 | `covmatch` | yes | no | — | greedy max log-det (max feature volume) |
 | `momentmatch` | yes | **yes** | `--momentmatch-mean-weight` | match full-pool mean+covariance |
 | `qddpp` | yes | no | `--select-beta`, `--select-quality` | quality↔volume DPP; β interpolates stock↔covmatch |
+| `relmatch` | no — **soft labels** | **yes** | `--relmatch-diag-weight` | match full-pool mean soft label = class-relation row `R[i,:]` (off-diagonal by default) |
 
 ---
 
-## 9. How it's wired into synthesis
+## 10. How it's wired into synthesis
 
 The call site, once per class batch, in [`synthesize/main.py`](../synthesize/main.py):
 
@@ -377,6 +457,7 @@ for c, (images, labels) in enumerate(tqdm(train_loader)):
         mean_weight=getattr(args, "momentmatch_mean_weight", 1.0),
         beta=getattr(args, "select_beta", 0.0),
         quality=getattr(args, "select_quality", "confidence"),
+        diag_weight=getattr(args, "relmatch_diag_weight", 0.0),
     )
     images = mix_images(images, args.input_size, args.factor, args.ipc)
     save_images(args, denormalize(images), c)
@@ -397,6 +478,8 @@ if getattr(args, "select_method", "stock") != "stock":
         args.exp_name += f"_b{getattr(args, 'select_beta', 0.0):g}"
         if getattr(args, "select_quality", "confidence") != "confidence":
             args.exp_name += f"_q{args.select_quality}"
+    if args.select_method == "relmatch" and abs(getattr(args, "relmatch_diag_weight", 0.0)) > 1e-9:
+        args.exp_name += f"_dw{args.relmatch_diag_weight:g}"   # non-default (≠0) diag-weight keyed too
     _fl = getattr(args, "select_realism_floor", 3.0)        # non-default floor keyed too
     ...
 ```
@@ -406,7 +489,7 @@ at distinct paths and are never confused.
 
 ---
 
-## 10. Try one
+## 11. Try one
 
 ```bash
 # stock vs covmatch on one cell / one seed

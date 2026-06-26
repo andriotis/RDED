@@ -49,6 +49,8 @@ from validation.diagnostics import (
     build_ood_loader,
     build_real_train_fit_loader,
     run_diagnostics,
+    collect_outputs,
+    soft_label_stats,
 )
 from validation.results_logger import log_run
 from validation.aim_logger import AimLogger
@@ -306,12 +308,38 @@ def main_worker(args):
             diagnostics = run_trust_panel(student_model, args)
             print(f"Diagnostics: {diagnostics}")
 
+        # Soft-label sharpness: teacher's predictions on the distilled images (always
+        # computed — free since the teacher stays in memory and the distilled set is tiny).
+        sl_stats = None
+        try:
+            _sl_dataset = ImageFolder(
+                classes=range(args.nclass), ipc=args.ipc, mem=True, shuffle=False,
+                root=args.syn_data_path,
+                transform=transforms.Compose([transforms.ToTensor(), IMAGENET_NORM]),
+            )
+            _sl_loader = torch.utils.data.DataLoader(
+                _sl_dataset, batch_size=args.re_batch_size, shuffle=False,
+                num_workers=args.workers, pin_memory=True,
+            )
+            teacher_model.eval()
+            with torch.no_grad():
+                _sl_out = collect_outputs(teacher_model, _sl_loader, capture_features=False)
+            sl_stats = soft_label_stats(_sl_out["logits"])
+            print(
+                f"soft-labels (distilled): ent={sl_stats['sl_entropy_mean']:.3f}"
+                f"±{sl_stats['sl_entropy_std']:.3f}  conf={sl_stats['sl_conf_mean']:.3f}"
+                f"  eff_n={sl_stats['sl_eff_n_mean']:.2f}"
+            )
+        except Exception as _e:
+            print(f"[warn] soft_label_stats skipped: {_e}")
+
         results_path = log_run(
             args,
             best_top1=best_acc1,
             final_top1=last_top1,
             nc_metrics=last_nc,
             diagnostics=diagnostics,
+            sl_stats=sl_stats,
         )
         print(f"Logged run to {results_path}")
         tracker.log_hparams(args, best_top1=best_acc1, final_top1=last_top1)

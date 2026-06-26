@@ -121,6 +121,30 @@ def energy_scores(logits, T=1.0):
     return (T * torch.logsumexp(logits.float() / T, dim=1)).numpy()
 
 
+def soft_label_stats(logits):
+    """Entropy and sharpness of teacher soft-labels.
+
+    Args:
+        logits: [N, K] tensor (raw logits; softmax applied internally)
+    Returns:
+        dict: sl_entropy_mean, sl_entropy_std, sl_conf_mean, sl_eff_n_mean
+              sl_eff_n = exp(H) — effective number of classes with non-trivial mass;
+              1.0 = perfectly one-hot, K = uniform.
+    """
+    p = torch.softmax(logits.float(), dim=1)
+    H    = -(p * torch.log(p + 1e-12)).sum(dim=1)  # [N] nats
+    conf = p.max(dim=1).values                      # [N]
+    eff_n = H.exp()                                 # [N] per-sample effective classes
+    return {
+        "sl_entropy_mean": float(H.mean()),
+        "sl_entropy_std":  float(H.std()),
+        "sl_conf_mean":    float(conf.mean()),
+        "sl_conf_std":     float(conf.std()),
+        "sl_eff_n_mean":   float(eff_n.mean()),
+        "sl_eff_n_std":    float(eff_n.std()),
+    }
+
+
 def feat_norm_scores(features):
     """L2 norm of penultimate features (higher => more in-distribution).
 
@@ -214,6 +238,71 @@ def within_class_cov(features, labels, num_classes, normalize=True):
     means[present] = means[present] / counts[present].unsqueeze(1)
     centered = feats - means[labels]
     return centered.t() @ centered / N
+
+
+def class_relation_matrix(logits, labels, num_classes):
+    """K×K class-relation matrix R: R[i, j] = average teacher soft-label mass class-i samples
+    place on class j (Formalization 1 in the trustworthy-distillation thread).
+
+    Row i is the mean softmax vector over all samples labelled i, so R is row-stochastic and its
+    off-diagonal carries the inter-class relational geometry. The relmatch selector targets these
+    rows; comparing R on a distilled set vs a real reference (see `relation_divergence`) measures
+    how well the distilled set preserves that geometry. Returns [K, K] float64 (absent classes get
+    a zero row).
+    """
+    probs = F.softmax(logits.detach().to(torch.float64), dim=1)
+    labels = labels.detach().long()
+    N = probs.shape[0]
+    R = torch.zeros(num_classes, num_classes, dtype=torch.float64)
+    counts = torch.zeros(num_classes, dtype=torch.float64)
+    R.index_add_(0, labels, probs)
+    counts.index_add_(0, labels, torch.ones(N, dtype=torch.float64))
+    present = counts > 0
+    R[present] = R[present] / counts[present].unsqueeze(1)
+    return R
+
+
+def relation_divergence(R_real, R_syn, top_m=5):
+    """Divergence between two class-relation matrices (real reference vs distilled set).
+
+    Reports (lower = closer, except the eigen-overlap):
+        rel_frob             ||R_real - R_syn||_F                          (overall)
+        rel_frob_offdiag     same with diagonals zeroed                    (inter-class only)
+        rel_row_cos_offdiag  1 - mean_i cos(off-diagonal rows)  in [0, 2]  (relational *shape*)
+        rel_eig_overlap      top-m eigenvector subspace overlap of the     (in [0, 1]; 1 = identical
+                             symmetrized (R + R^T)/2, ||U^T V||_F^2 / m      principal relational axes)
+
+    The off-diagonal terms are the headline: stock (top-confidence) selection collapses the
+    off-diagonal mass, so relmatch should lower rel_frob_offdiag / rel_row_cos_offdiag and raise
+    rel_eig_overlap relative to stock at matched IPC.
+    """
+    Rr = R_real.detach().to(torch.float64)
+    Rs = R_syn.detach().to(torch.float64)
+    K = Rr.shape[0]
+    rel_frob = float(torch.linalg.norm(Rr - Rs).item())
+
+    eye = torch.eye(K, dtype=torch.bool)
+    Rr_off = Rr.clone(); Rr_off[eye] = 0.0
+    Rs_off = Rs.clone(); Rs_off[eye] = 0.0
+    rel_frob_offdiag = float(torch.linalg.norm(Rr_off - Rs_off).item())
+
+    cos = F.cosine_similarity(Rr_off, Rs_off, dim=1, eps=1e-12)   # per-row, off-diagonal
+    rel_row_cos_offdiag = float((1.0 - cos.mean()).item())
+
+    m = max(1, min(int(top_m), K))
+    Sr = (Rr + Rr.t()) / 2.0
+    Ss = (Rs + Rs.t()) / 2.0
+    # eigh returns ascending eigenvalues, so the last m columns are the top-m eigenvectors.
+    Ur = torch.linalg.eigh(Sr).eigenvectors[:, -m:]
+    Us = torch.linalg.eigh(Ss).eigenvectors[:, -m:]
+    rel_eig_overlap = float((torch.linalg.norm(Ur.t() @ Us) ** 2 / m).item())
+
+    return {
+        "rel_frob": rel_frob,
+        "rel_frob_offdiag": rel_frob_offdiag,
+        "rel_row_cos_offdiag": rel_row_cos_offdiag,
+        "rel_eig_overlap": rel_eig_overlap,
+    }
 
 
 def fit_temperature(logits, labels):

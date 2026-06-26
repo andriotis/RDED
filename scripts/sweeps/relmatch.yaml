@@ -1,0 +1,46 @@
+# relmatch (class-relation matrix) selector — run as a regular YAML sweep.
+#
+#   python scripts/run_sweep.py scripts/sweeps/relmatch.yaml --dry-run        # preview commands
+#   python scripts/run_sweep.py scripts/sweeps/relmatch.yaml --per-gpu 2      # run it
+#   python scripts/run_sweep.py scripts/sweeps/relmatch.yaml --resume         # skip done cells
+#
+# relmatch keeps, per class, the real crops whose mean teacher soft-label matches the class's
+# full-pool row R[i,:] of the class-relation matrix. relmatch_diag_weight=0 (default) matches the
+# off-diagonal / inter-class structure (1.0 = the literal full row). Non-stock selectors path-key
+# their distilled set (exp/<...>_selrelmatch/), so the stock control is never clobbered.
+#
+# diagnostics: true logs the full trust panel (ECE / OOD-AUROC / NC) next to accuracy — the metrics
+# relmatch is meant to move (first run downloads SVHN once). Results go to logs/results_select.jsonl,
+# so `python tools/analyze_select.py` tabulates stock vs relmatch. Background: docs/RELMATCH_EXPLAINED.md
+# and docs/SELECTORS.md §8.
+
+defaults:
+  dataset: cifar100
+  arch: resnet18_modified            # teacher (also scores synthesis); student defaults to the same
+  ipc: 10
+  seed: [42, 43, 44]    # one value (seed: 42) is a faster smoke
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  diagnostics: true
+  ood_sets: svhn
+  fit_ipc: 50
+  results_file: logs/results_select.jsonl
+  weights:
+    kl: 1.0             # stock RDED knowledge-distillation loss
+
+experiments:
+  # Control: plain RDED top-confidence selection (the baseline relmatch is judged against).
+  - name: stock
+    select_method: stock
+
+  # relmatch, off-diagonal (the default) — match only the inter-class soft-label structure.
+  - name: relmatch_offdiag
+    select_method: relmatch
+    relmatch_diag_weight: 0.0
+
+  # Knob ablation: match the literal full row R[i,:], self-class confidence included.
+  - name: relmatch_fullrow
+    select_method: relmatch
+    relmatch_diag_weight: 1.0

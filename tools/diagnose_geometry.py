@@ -44,6 +44,9 @@ from validation.diagnostics import (
     build_svhn_ood_loader,
     collect_outputs,
     within_class_cov,
+    class_relation_matrix,
+    relation_divergence,
+    soft_label_stats,
     run_diagnostics,
     _id_panel,
 )
@@ -63,16 +66,16 @@ def build_args():
                         "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
     p.add_argument("--select-method", type=str, default="stock",
-                   choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp"],
+                   choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch"],
                    help="inspect a variance-aware distilled set (tags exp_name with _sel<method>, "
                         "matching argument.py); 'stock' is the plain RDED set")
-    p.add_argument("--select-realism-floor", type=float, default=3.0, dest="select_realism_floor",
-                   help="must match the synthesized set's floor; path-keyed as _fl<F> when != 3.0")
     p.add_argument("--select-beta", type=float, default=0.0, dest="select_beta",
                    help="qddpp beta (path-keyed _b<beta>, matching argument.py)")
     p.add_argument("--select-quality", type=str, default="confidence",
                    choices=["confidence", "margin"], dest="select_quality",
                    help="qddpp quality score (path-keyed _q<quality> when != confidence)")
+    p.add_argument("--relmatch-diag-weight", type=float, default=0.0, dest="relmatch_diag_weight",
+                   help="relmatch self-class weight (path-keyed _dw<w> when != 0, matching argument.py)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--re-batch-size", type=int, default=256)
@@ -95,8 +98,8 @@ def build_args():
             args.exp_name += f"_b{args.select_beta:g}"
             if args.select_quality != "confidence":
                 args.exp_name += f"_q{args.select_quality}"
-        if abs(args.select_realism_floor - 3.0) > 1e-9:
-            args.exp_name += f"_fl{args.select_realism_floor:g}"
+        if args.select_method == "relmatch" and abs(args.relmatch_diag_weight) > 1e-9:
+            args.exp_name += f"_dw{args.relmatch_diag_weight:g}"
     args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"
     args.train_dir = f"./data/{args.subset}/train/"
     args.val_dir = f"./data/{args.subset}/val/"
@@ -168,6 +171,19 @@ def main():
     geo_distilled["wcov_effrank"] = _eff_rank(Sd)
     geo_real["wcov_effrank"] = _eff_rank(Sr)
 
+    # Class-relation geometry: how well the distilled set preserves the teacher's K×K inter-class
+    # soft-label structure R (Formalization 1 — the object the relmatch selector targets). The
+    # off-diagonal terms are exactly what top-confidence (stock) selection collapses.
+    R_syn = class_relation_matrix(out_d["logits"], out_d["labels"], args.nclass)
+    R_real = class_relation_matrix(out_r["logits"], out_r["labels"], args.nclass)
+    geo_distilled.update(relation_divergence(R_real, R_syn))
+
+    # Soft-label sharpness: how diffuse vs one-hot are the teacher predictions on each set.
+    sl_d = soft_label_stats(out_d["logits"])
+    sl_r = soft_label_stats(out_r["logits"])
+    geo_distilled.update({f"sl_{k}": v for k, v in sl_d.items()})
+    geo_real.update({f"sl_{k}": v for k, v in sl_r.items()})
+
     print("=> teacher reference: calibration + open-set on real val vs SVHN")
     val_loader = _loader(args.val_dir, args.val_ipc, args)
     ood_loader = build_svhn_ood_loader(args, max_samples=args.ood_max)
@@ -197,6 +213,18 @@ def main():
         f"cov_gap(distilled vs real, normalized within-class Sigma) = "
         f"{geo_distilled['cov_gap_to_real']:.4f}  |  wcov eff-rank: "
         f"distilled={geo_distilled['wcov_effrank']:.2f} real={geo_real['wcov_effrank']:.2f}\n"
+    )
+    print(
+        f"R-matrix vs real (class-relation): frob={geo_distilled['rel_frob']:.4f}  "
+        f"offdiag={geo_distilled['rel_frob_offdiag']:.4f}  "
+        f"row_cos_offdiag={geo_distilled['rel_row_cos_offdiag']:.4f}  "
+        f"eig_overlap={geo_distilled['rel_eig_overlap']:.4f}\n"
+    )
+    print(
+        f"soft-labels (distilled): ent={sl_d['sl_entropy_mean']:.3f}±{sl_d['sl_entropy_std']:.3f}"
+        f"  conf={sl_d['sl_conf_mean']:.3f}  eff_n={sl_d['sl_eff_n_mean']:.2f}"
+        f"   [real: ent={sl_r['sl_entropy_mean']:.3f}±{sl_r['sl_entropy_std']:.3f}"
+        f"  conf={sl_r['sl_conf_mean']:.3f}  eff_n={sl_r['sl_eff_n_mean']:.2f}]\n"
     )
 
     # --- append to logs/diagnostics.jsonl ---

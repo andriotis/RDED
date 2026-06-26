@@ -19,7 +19,7 @@ import time
 from validation.losses import LOSS_REGISTRY
 
 
-def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None):
+def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None, sl_stats=None):
     """Append one run's result to args.results_file (default: ./logs/results.jsonl).
 
     `diagnostics` (optional): the dict from validation.diagnostics.run_diagnostics
@@ -49,6 +49,7 @@ def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None):
         "nc3": None if nc_metrics is None else nc_metrics.get("nc3"),
         "nc4": None if nc_metrics is None else nc_metrics.get("nc4"),
         "diag": diagnostics,
+        "sl_stats": sl_stats,
         "exp_name": args.exp_name,
     }
     # Parallel sweep cells may finish near-simultaneously; take an exclusive

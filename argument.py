@@ -193,25 +193,19 @@ parser.add_argument(
 )
 
 # Stage-1 selection (the variance-aware intervention). 'stock' = RDED top-confidence.
-# The others inject within-class variance over a realism-floored pool at the same IPC.
+# The others inject within-class variance over the full per-class pool at the same IPC.
 parser.add_argument(
     "--select-method",
     type=str,
     default="stock",
-    choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp"],
+    choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch"],
     help="crop selection: stock=top teacher-confidence (RDED); random/stratified/covmatch/"
          "momentmatch spread the selection across the class's feature spread at fixed IPC "
          "(covmatch maximizes feature volume; momentmatch matches the pool mean+covariance); "
          "qddpp = quality-diversity DPP that interpolates covmatch (--select-beta 0) and stock "
-         "(--select-beta large) with one knob",
-)
-parser.add_argument(
-    "--select-realism-floor",
-    type=float,
-    default=3.0,
-    dest="select_realism_floor",
-    help="eligible pool = ceil(this * n_select) most-confident candidates (>=1); a realism "
-         "guard so variance-seeking selectors never pick teacher-garbage crops",
+         "(--select-beta large) with one knob; relmatch matches each class's mean teacher "
+         "soft-label to its full-pool row R[i,:] (the class-relation matrix), with "
+         "--relmatch-diag-weight controlling the self-class term",
 )
 parser.add_argument(
     "--select-k",
@@ -245,6 +239,15 @@ parser.add_argument(
     help="--select-method qddpp quality score: confidence = teacher CE loss (far-OOD / "
          "calibration lever); margin = top1-top2 logit gap, up-weighting boundary crops "
          "(the near-OOD lever)",
+)
+parser.add_argument(
+    "--relmatch-diag-weight",
+    type=float,
+    default=0.0,
+    dest="relmatch_diag_weight",
+    help="--select-method relmatch self-class weight: weight on coordinate i (the diagonal "
+         "R[i,i]) in the soft-label match. 0 (default) matches only the off-diagonal / inter-class "
+         "profile (the 'how classes differ' signal); 1.0 matches the literal full row R[i,:]",
 )
 parser.add_argument(
     "--synth-only",
@@ -449,11 +452,12 @@ if getattr(args, "select_method", "stock") != "stock":
         args.exp_name += f"_b{getattr(args, 'select_beta', 0.0):g}"
         if getattr(args, "select_quality", "confidence") != "confidence":
             args.exp_name += f"_q{args.select_quality}"
-    # Path-key a non-default realism floor too, so floor variants of a selector are stored
-    # (and synth-cached) separately and never clobber the floor=3.0 baseline set.
-    _fl = getattr(args, "select_realism_floor", 3.0)
-    if abs(_fl - 3.0) > 1e-9:
-        args.exp_name += f"_fl{_fl:g}"
+    # relmatch's self-class weight changes the distilled set; path-key a non-default (!=0) value
+    # so diag-weight variants stay separately synth-cached and never clobber the dw=0 baseline.
+    if args.select_method == "relmatch":
+        _dw = getattr(args, "relmatch_diag_weight", 0.0)
+        if abs(_dw) > 1e-9:
+            args.exp_name += f"_dw{_dw:g}"
 if not os.path.exists(f"./exp/{args.exp_name}"):
     os.makedirs(f"./exp/{args.exp_name}")
 args.syn_data_path = os.path.join("./exp/" + args.exp_name, args.syn_data_path)

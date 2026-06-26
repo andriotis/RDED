@@ -23,12 +23,9 @@ SCORES = ["auroc_maha", "auroc_msp"]
 
 
 def method_of(exp_name):
-    for m in ("covmatch", "stratified", "random", "momentmatch"):
+    for m in ("covmatch", "stratified", "random", "momentmatch", "relmatch"):
         if exp_name and f"_sel{m}" in exp_name:
-            # distinguish a non-default realism floor (path-keyed _fl<F>)
-            import re
-            fl = re.search(r"_fl(\d+)", exp_name)
-            return f"{m}_fl{fl.group(1)}" if fl else m
+            return m
     return "stock"
 
 

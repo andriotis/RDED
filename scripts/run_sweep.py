@@ -8,6 +8,10 @@ scripts/experiment.sh for each cell.
 Schema (per experiment block):
   Scalar/list fields handled identically: dataset, arch, stud_arch, seed, ipc,
   re_epochs, factor, num_crop, mipc, skip_synth.
+  Stage-1 selector + diagnostics (optional; omit => plain stock RDED, accuracy only):
+  select_method, select_k, select_beta, select_quality,
+  momentmatch_mean_weight, relmatch_diag_weight, diagnostics (bool), ood_sets,
+  fit_ipc, results_file. All are list-expandable (e.g. relmatch_diag_weight: [0.0, 1.0]).
   `weights:` may be either:
     - a dict, possibly with list-valued entries (cartesian-product across them):
         weights:
@@ -73,9 +77,20 @@ SCALAR_FLAG_KEYS = [
     ("mipc",       "--mipc"),
     ("monitor",    "--monitor"),
     ("gce_q",      "--gce-q"),
+    # Stage-1 selector + trustworthiness-diagnostics knobs (omit => stock RDED, accuracy-only).
+    ("select_method",           "--select-method"),
+    ("select_k",                "--select-k"),
+    ("select_beta",             "--select-beta"),
+    ("select_quality",          "--select-quality"),
+    ("momentmatch_mean_weight", "--momentmatch-mean-weight"),
+    ("relmatch_diag_weight",    "--relmatch-diag-weight"),
+    ("ood_sets",                "--ood-sets"),
+    ("fit_ipc",                 "--fit-ipc"),
+    ("results_file",            "--results-file"),
 ]
 BOOL_FLAG_KEYS = [
-    ("skip_synth", "--skip-synth"),
+    ("skip_synth",  "--skip-synth"),
+    ("diagnostics", "--diagnostics"),
 ]
 ALL_KEYS = (
     {k for k, _ in SCALAR_FLAG_KEYS}
