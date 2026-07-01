@@ -16,7 +16,12 @@ import json
 import os
 import time
 
-from validation.losses import LOSS_REGISTRY
+from validation.run_key import (
+    canonical_run_key,
+    diagnostics_config,
+    run_hash,
+    selector_config,
+)
 
 
 def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None, sl_stats=None):
@@ -28,6 +33,7 @@ def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None, sl_stats=
     """
     path = getattr(args, "results_file", None) or os.path.join("logs", "results.jsonl")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    key = canonical_run_key(args)
 
     row = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -40,7 +46,7 @@ def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None, sl_stats=
         "num_crop": args.num_crop,
         "re_epochs": args.re_epochs,
         "seed": args.seed,
-        "weights": {name: float(getattr(args, f"w_{name}")) for name in LOSS_REGISTRY},
+        "weights": key["weights"],   # canonical (same source as run_key); avoids a second resolution path
         "gce_q": float(getattr(args, "gce_q", 0.7)),
         "best_top1": float(best_top1),
         "final_top1": float(final_top1),
@@ -51,6 +57,10 @@ def log_run(args, best_top1, final_top1, nc_metrics, diagnostics=None, sl_stats=
         "diag": diagnostics,
         "sl_stats": sl_stats,
         "exp_name": args.exp_name,
+        "selector": selector_config(args),
+        "diagnostics_config": diagnostics_config(args),
+        "run_key": key,
+        "run_hash": run_hash(key),
     }
     # Parallel sweep cells may finish near-simultaneously; take an exclusive
     # lock so concurrent appends can't interleave or truncate a JSONL line.

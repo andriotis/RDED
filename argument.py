@@ -3,6 +3,7 @@ import os
 import math
 
 from validation.losses import LOSS_REGISTRY
+from validation.run_key import selector_suffix
 from validation.utils import DATASET_META
 
 parser = argparse.ArgumentParser("RDED")
@@ -198,14 +199,16 @@ parser.add_argument(
     "--select-method",
     type=str,
     default="stock",
-    choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch"],
+    choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch", "reldist", "facloc"],
     help="crop selection: stock=top teacher-confidence (RDED); random/stratified/covmatch/"
          "momentmatch spread the selection across the class's feature spread at fixed IPC "
          "(covmatch maximizes feature volume; momentmatch matches the pool mean+covariance); "
          "qddpp = quality-diversity DPP that interpolates covmatch (--select-beta 0) and stock "
          "(--select-beta large) with one knob; relmatch matches each class's mean teacher "
-         "soft-label to its full-pool row R[i,:] (the class-relation matrix), with "
-         "--relmatch-diag-weight controlling the self-class term",
+         "soft-label to its full-pool row R[i,:] (the class-relation matrix); reldist matches each "
+         "class's full soft-label *distribution* per coordinate (Wasserstein), not just its mean; "
+         "facloc = greedy facility-location coverage of the full per-class pool (set-level "
+         "complementarity), over the embedding chosen by --facloc-space",
 )
 parser.add_argument(
     "--select-k",
@@ -241,13 +244,14 @@ parser.add_argument(
          "(the near-OOD lever)",
 )
 parser.add_argument(
-    "--relmatch-diag-weight",
-    type=float,
-    default=0.0,
-    dest="relmatch_diag_weight",
-    help="--select-method relmatch self-class weight: weight on coordinate i (the diagonal "
-         "R[i,i]) in the soft-label match. 0 (default) matches only the off-diagonal / inter-class "
-         "profile (the 'how classes differ' signal); 1.0 matches the literal full row R[i,:]",
+    "--facloc-space",
+    type=str,
+    default="softlabel",
+    dest="facloc_space",
+    choices=["softlabel", "feature"],
+    help="--select-method facloc embedding the coverage runs over: softlabel = teacher "
+         "soft-labels (the relational manifold / class-relation matrix R); feature = penultimate "
+         "features (the coverage sibling of covmatch's feature-volume objective)",
 )
 parser.add_argument(
     "--synth-only",
@@ -442,22 +446,9 @@ if args.re_accum_steps != 1:
 
 # result dir for saving
 args.exp_name = f"{args.subset}_{args.arch_name}_f{args.factor}_mipc{args.mipc}_ipc{args.ipc}_cr{args.num_crop}"
-# Key the distilled-set path by the selection method so non-stock variants are stored
-# (and synth-cached) separately and never clobber or get falsely reused as the stock set.
-if getattr(args, "select_method", "stock") != "stock":
-    args.exp_name += f"_sel{args.select_method}"
-    # qddpp is a one-knob family: each beta (and a non-default quality score) is a distinct
-    # distilled set, so path-key both to keep them separately synth-cached.
-    if args.select_method == "qddpp":
-        args.exp_name += f"_b{getattr(args, 'select_beta', 0.0):g}"
-        if getattr(args, "select_quality", "confidence") != "confidence":
-            args.exp_name += f"_q{args.select_quality}"
-    # relmatch's self-class weight changes the distilled set; path-key a non-default (!=0) value
-    # so diag-weight variants stay separately synth-cached and never clobber the dw=0 baseline.
-    if args.select_method == "relmatch":
-        _dw = getattr(args, "relmatch_diag_weight", 0.0)
-        if abs(_dw) > 1e-9:
-            args.exp_name += f"_dw{_dw:g}"
+# Key the distilled-set path by selector settings that affect synthesis so
+# variants never clobber or get falsely reused as a stock/default set.
+args.exp_name += selector_suffix(args)
 if not os.path.exists(f"./exp/{args.exp_name}"):
     os.makedirs(f"./exp/{args.exp_name}")
 args.syn_data_path = os.path.join("./exp/" + args.exp_name, args.syn_data_path)

@@ -1,0 +1,40 @@
+defaults:
+  dataset: cifar100
+  arch: resnet18_modified
+  ipc: 10
+  seed: [42, 43, 44]
+  factor: 1
+  num_crop: 5
+  mipc: 300
+  re_epochs: 300
+  diagnostics: true
+  ood_sets: svhn
+  fit_ipc: 50
+  results_file: logs/results_select.jsonl
+  weights:
+    kl: 1.0             # stock RDED knowledge-distillation loss
+
+experiments:
+  # Control: plain RDED top-confidence selection (the baseline relmatch is judged against).
+  - name: stock
+    select_method: stock
+
+  # relmatch: match each class's mean teacher soft-label to its full-pool row R[i,:].
+  - name: relmatch
+    select_method: relmatch
+
+  # reldist: match each class's full soft-label distribution (per-coordinate Wasserstein) to the pool.
+  - name: reldist
+    select_method: reldist
+
+  # facloc: greedy facility-location COVERAGE of the full pool (set-level complementarity, (1-1/e)
+  # greedy) over the teacher soft-labels — the relational manifold R.
+  - name: facloc-softlabel
+    select_method: facloc
+    facloc_space: softlabel
+
+  # facloc in feature space: the coverage-vs-volume ablation against covmatch (same penultimate
+  # features covmatch maximizes the volume of).
+  - name: facloc-feature
+    select_method: facloc
+    facloc_space: feature

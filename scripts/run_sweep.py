@@ -9,9 +9,9 @@ Schema (per experiment block):
   Scalar/list fields handled identically: dataset, arch, stud_arch, seed, ipc,
   re_epochs, factor, num_crop, mipc, skip_synth.
   Stage-1 selector + diagnostics (optional; omit => plain stock RDED, accuracy only):
-  select_method, select_k, select_beta, select_quality,
-  momentmatch_mean_weight, relmatch_diag_weight, diagnostics (bool), ood_sets,
-  fit_ipc, results_file. All are list-expandable (e.g. relmatch_diag_weight: [0.0, 1.0]).
+  select_method, select_k, select_beta, select_quality, facloc_space,
+  momentmatch_mean_weight, diagnostics (bool), ood_sets,
+  fit_ipc, results_file. All are list-expandable (e.g. select_beta: [0.0, 0.5]).
   `weights:` may be either:
     - a dict, possibly with list-valued entries (cartesian-product across them):
         weights:
@@ -23,9 +23,10 @@ Schema (per experiment block):
           - {kl: 1.0, ockl: 1.0}    # 2 cells
 
 Top-level behavior:
-  - Default: rotate logs/results.jsonl -> logs/results-YYYYMMDD[-N].jsonl
-    once at the start, then run cells and append fresh rows.
-  - --resume: skip rotation; pass --resume through to experiment.sh.
+  - Default: skip completed deterministic cells, then rotate logs/results.jsonl
+    -> logs/results-YYYYMMDD[-N].jsonl only if at least one cell remains to run.
+  - --resume: skip rotation; completed-cell skipping still happens by default.
+  - --force: rerun every cell and disable completed-cell skipping.
   - --dry-run: pass --dry-run through; rotation message printed but not enacted.
 
 Execution (GPU-agnostic, throughput-first):
@@ -62,6 +63,16 @@ import threading
 import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from validation.run_key import (  # noqa: E402
+    canonical_run_key,
+    effective_results_file,
+    find_completed_result,
+    load_result_history,
+    run_hash,
+)
 
 # Flag mapping: YAML key -> experiment.sh flag (for the simple scalar fields).
 # `weights` is handled separately (dict / list-of-dicts).
@@ -82,8 +93,8 @@ SCALAR_FLAG_KEYS = [
     ("select_k",                "--select-k"),
     ("select_beta",             "--select-beta"),
     ("select_quality",          "--select-quality"),
+    ("facloc_space",            "--facloc-space"),
     ("momentmatch_mean_weight", "--momentmatch-mean-weight"),
-    ("relmatch_diag_weight",    "--relmatch-diag-weight"),
     ("ood_sets",                "--ood-sets"),
     ("fit_ipc",                 "--fit-ipc"),
     ("results_file",            "--results-file"),
@@ -216,6 +227,25 @@ def rotate_results(dry_run):
         print(f"Rotated {src} -> {candidate}", flush=True)
 
 
+def _relpath(path):
+    try:
+        return os.path.relpath(path, REPO_ROOT)
+    except ValueError:
+        return path
+
+
+def _skip_message(name, params, match):
+    key = canonical_run_key(params)
+    src = _relpath(match["path"])
+    selector = key["selector"]["method"]
+    return (
+        f"[skip] {name}: dataset={key['dataset']} arch={key['arch']} "
+        f"stud={key['stud']} ipc={key['ipc']} seed={key['seed']} "
+        f"selector={selector} run_hash={run_hash(key)} "
+        f"(already in {src}:{match['line_no']})"
+    )
+
+
 def detect_gpus():
     """Ordered list of GPU ids (as strings) this sweep may use.
 
@@ -262,7 +292,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="print expanded commands without executing")
     ap.add_argument("--resume", action="store_true",
-                    help="skip rotation; pass --resume to experiment.sh per cell")
+                    help="skip rotation; completed-cell skipping remains enabled")
+    ap.add_argument("--force", action="store_true",
+                    help="rerun all expanded cells, even if matching results already exist")
     ap.add_argument("--gpus", default="",
                     help="comma-separated GPU ids to use "
                          "(default: auto-detect via CUDA_VISIBLE_DEVICES / nvidia-smi)")
@@ -289,13 +321,6 @@ def main():
         sys.exit("require --num-shards >= 1 and 0 <= --shard < --num-shards")
 
     defaults, experiments = load_config(args.config)
-
-    if args.resume:
-        print("Resume mode: rotation skipped; cells already in results.jsonl will be skipped.",
-              flush=True)
-    else:
-        rotate_results(args.dry_run)
-
     expanded = []
     for exp in experiments:
         name = exp.get("name", "<unnamed>")
@@ -307,6 +332,43 @@ def main():
     indexed = list(enumerate(expanded))
     if args.num_shards > 1:
         indexed = indexed[args.shard::args.num_shards]
+
+    skipped = []
+    if args.force:
+        print("Force mode: completed-cell skipping disabled.", flush=True)
+    else:
+        history_cache = {}
+        pending = []
+        for cell_idx, (name, params) in indexed:
+            results_file = os.path.abspath(effective_results_file(params))
+            if results_file not in history_cache:
+                history_cache[results_file] = load_result_history(results_file)
+            match = find_completed_result(params, history_cache[results_file])
+            if match:
+                skipped.append((cell_idx, name, params, match))
+                print(_skip_message(name, params, match), flush=True)
+            else:
+                pending.append((cell_idx, (name, params)))
+        indexed = pending
+
+    if args.resume:
+        print("Resume mode: rotation skipped.", flush=True)
+    elif indexed:
+        rotate_results(args.dry_run)
+    else:
+        print("All cells on this server are already complete; rotation skipped.", flush=True)
+
+    sweep_name = os.path.splitext(os.path.basename(args.config))[0]
+    shard_note = "" if args.num_shards == 1 else f" | shard {args.shard}/{args.num_shards}"
+    print(
+        f"Sweep: {args.config} | {len(experiments)} blocks | {len(expanded)} cells"
+        f"{shard_note} ({len(indexed)} scheduled, {len(skipped)} skipped on this server)",
+        flush=True,
+    )
+
+    if not indexed:
+        print(f"Sweep complete: 0/0 ok, 0 failed, {len(skipped)} skipped")
+        sys.exit(0)
 
     if args.gpus.strip():
         gpus = [t.strip() for t in args.gpus.split(",") if t.strip() != ""]
@@ -346,15 +408,8 @@ def main():
         gpu_slots = {g: args.per_gpu for g in gpus}
 
     slots = sum(gpu_slots[g] for g in gpus)
-    sweep_name = os.path.splitext(os.path.basename(args.config))[0]
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
 
-    shard_note = "" if args.num_shards == 1 else f" | shard {args.shard}/{args.num_shards}"
-    print(
-        f"Sweep: {args.config} | {len(experiments)} blocks | {len(expanded)} cells"
-        f"{shard_note} ({len(indexed)} on this server)",
-        flush=True,
-    )
     layout = " ".join(f"{g}:{gpu_slots[g]}" for g in gpus)
     print(
         f"GPUs(slots): {layout} | concurrent slots: {slots}"
@@ -398,7 +453,10 @@ def main():
     def run_cell(cell_idx, name, params, gpu):
         argv = build_argv(params)
         argv += ["--sweep-name", sweep_name, "--cell-id", f"{name}:{cell_idx:04d}"]
-        if args.resume:
+        # Pass --resume to every cell unless --force. This re-checks history per cell on top of the
+        # one-time pre-scan above: intentional, defensive against a concurrent sweep/process completing
+        # the same cell between our scan and this launch (the same race results_logger guards with flock).
+        if args.resume or not args.force:
             argv.append("--resume")
         if args.dry_run:
             argv.append("--dry-run")
@@ -463,7 +521,10 @@ def main():
         sys.exit(130)
 
     done = counts["ran"] + counts["failed"]
-    print(f"Sweep complete: {counts['ran']}/{done} ok, {counts['failed']} failed")
+    print(
+        f"Sweep complete: {counts['ran']}/{done} ok, "
+        f"{counts['failed']} failed, {len(skipped)} skipped"
+    )
     sys.exit(0 if counts["failed"] == 0 else 1)
 
 

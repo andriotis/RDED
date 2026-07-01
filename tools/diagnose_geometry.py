@@ -46,10 +46,12 @@ from validation.diagnostics import (
     within_class_cov,
     class_relation_matrix,
     relation_divergence,
+    relation_distribution_divergence,
     soft_label_stats,
     run_diagnostics,
     _id_panel,
 )
+from validation.run_key import selector_suffix
 
 
 def build_args():
@@ -66,16 +68,21 @@ def build_args():
                         "use 'syn_data_seed<N>' to inspect a sweep-produced set)")
     p.add_argument("--real-ipc", type=int, default=0, help="images/class for the real-train reference subset (0 = match --ipc)")
     p.add_argument("--select-method", type=str, default="stock",
-                   choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch"],
+                   choices=["stock", "random", "stratified", "covmatch", "momentmatch", "qddpp", "relmatch", "reldist", "facloc"],
                    help="inspect a variance-aware distilled set (tags exp_name with _sel<method>, "
                         "matching argument.py); 'stock' is the plain RDED set")
+    p.add_argument("--select-k", type=int, default=8, dest="select_k",
+                   help="stratified clusters (path-keyed _k<k> when != 8, matching argument.py)")
     p.add_argument("--select-beta", type=float, default=0.0, dest="select_beta",
                    help="qddpp beta (path-keyed _b<beta>, matching argument.py)")
     p.add_argument("--select-quality", type=str, default="confidence",
                    choices=["confidence", "margin"], dest="select_quality",
                    help="qddpp quality score (path-keyed _q<quality> when != confidence)")
-    p.add_argument("--relmatch-diag-weight", type=float, default=0.0, dest="relmatch_diag_weight",
-                   help="relmatch self-class weight (path-keyed _dw<w> when != 0, matching argument.py)")
+    p.add_argument("--momentmatch-mean-weight", type=float, default=1.0, dest="momentmatch_mean_weight",
+                   help="momentmatch mean weight (path-keyed _mw<w> when != 1.0, matching argument.py)")
+    p.add_argument("--facloc-space", type=str, default="softlabel",
+                   choices=["softlabel", "feature"], dest="facloc_space",
+                   help="facloc coverage space (path-keyed _sp<space> when != softlabel, matching argument.py)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--re-batch-size", type=int, default=256)
@@ -92,14 +99,8 @@ def build_args():
         f"{args.subset}_{args.arch_name}_f{args.factor}"
         f"_mipc{args.mipc}_ipc{args.ipc}_cr{args.num_crop}"
     )
-    if args.select_method != "stock":
-        args.exp_name += f"_sel{args.select_method}"
-        if args.select_method == "qddpp":
-            args.exp_name += f"_b{args.select_beta:g}"
-            if args.select_quality != "confidence":
-                args.exp_name += f"_q{args.select_quality}"
-        if args.select_method == "relmatch" and abs(args.relmatch_diag_weight) > 1e-9:
-            args.exp_name += f"_dw{args.relmatch_diag_weight:g}"
+    # Single source of truth for the selector path suffix — identical to argument.py / experiment.sh.
+    args.exp_name += selector_suffix(args)
     args.syn_data_path = f"./exp/{args.exp_name}/{args.syn_leaf}"
     args.train_dir = f"./data/{args.subset}/train/"
     args.val_dir = f"./data/{args.subset}/val/"
@@ -177,6 +178,11 @@ def main():
     R_syn = class_relation_matrix(out_d["logits"], out_d["labels"], args.nclass)
     R_real = class_relation_matrix(out_r["logits"], out_r["labels"], args.nclass)
     geo_distilled.update(relation_divergence(R_real, R_syn))
+
+    # Per-class soft-label *distribution* match (Formalization 2 — the object reldist targets): the
+    # full per-coordinate Wasserstein that the mean-only R match (Formalization 1) leaves under-matched.
+    geo_distilled.update(relation_distribution_divergence(
+        out_r["logits"], out_r["labels"], out_d["logits"], out_d["labels"], args.nclass))
 
     # Soft-label sharpness: how diffuse vs one-hot are the teacher predictions on each set.
     sl_d = soft_label_stats(out_d["logits"])

@@ -20,7 +20,7 @@
 #     SEEDS="42 43 44"
 #     RE_EPOCHS=300  MIPC=300  NUM_CROP=5  FACTOR=1
 #     RESULTS_FILE=logs/results_select.jsonl
-#     REALISM_FLOOR=3.0  SELECT_K=8  FIT_IPC=50
+#     SELECT_K=8  FIT_IPC=50
 #     DRY_RUN=0   # 1 = print commands only
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -32,7 +32,7 @@ SEEDS="${SEEDS:-42 43 44}"
 RE_EPOCHS="${RE_EPOCHS:-300}"
 MIPC="${MIPC:-300}"; NUM_CROP="${NUM_CROP:-5}"; FACTOR="${FACTOR:-1}"
 RESULTS_FILE="${RESULTS_FILE:-logs/results_select.jsonl}"
-REALISM_FLOOR="${REALISM_FLOOR:-3.0}"; SELECT_K="${SELECT_K:-8}"; FIT_IPC="${FIT_IPC:-50}"
+SELECT_K="${SELECT_K:-8}"; FIT_IPC="${FIT_IPC:-50}"
 OOD_SETS="${OOD_SETS:-svhn}"          # comma list; svhn,dtd,cifar10 for the multi-OOD panel
 SAVE_STUDENT="${SAVE_STUDENT:-0}"     # 1 = persist student ckpt for --diagnostics-only re-eval
 SELECT_BETA="${SELECT_BETA:-0.0}"     # qddpp quality<->diversity knob (one value/invocation; sweep by
@@ -54,7 +54,7 @@ for method in $METHODS; do
           --re-epochs "$RE_EPOCHS" --seed "$seed"
           --syn-data-path "syn_data_seed${seed}"
           --select-method "$method"
-          --select-realism-floor "$REALISM_FLOOR" --select-k "$SELECT_K"
+          --select-k "$SELECT_K"
           --fit-ipc "$FIT_IPC"
           --diagnostics --ood-sets "$OOD_SETS"
           --results-file "$RESULTS_FILE" --disable-aim

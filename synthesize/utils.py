@@ -304,27 +304,25 @@ def _select_qddpp(n, feats, qual_raw, beta, gen):
     return torch.tensor(selected[:n], dtype=torch.long)
 
 
-def _select_relmatch(n, cand_probs, target_row, diag_weight, diag_idx, gen):
+def _select_relmatch(n, cand_probs, target_row, gen):
     """v4 (Formalization 1: class-relation matrix): greedy mean-matching in teacher *soft-label*
     space. Where momentmatch matches the pool's mean+covariance in penultimate *feature* space,
     relmatch matches each class's mean teacher softmax vector to its full-pool row
 
         R[i, :] = average soft-label mass class-i samples place on every class j,
 
-    the inter-class relational geometry the feature-space selectors are blind to. The selected
-    subset induces R̂[i, :] = mean_{s in S} p_s; the objective is R̂[i, :] ≈ R[i, :], i.e. over the
-    full per-class pool (|S| = n) minimize
+    the relational geometry the feature-space selectors are blind to. The selected subset induces
+    R̂[i, :] = mean_{s in S} p_s; over the full per-class pool (|S| = n) we minimize the full-row
+    squared error
 
-        J(S) = || w (.) ( mean_{s in S} p_s  -  r_i ) ||^2 ,   w_j = 1 (j != i), w_i = diag_weight
+        J(S) = || mean_{s in S} p_s  -  r_i ||^2 ,
 
-    with p_s the teacher softmax (K-dim simplex) and r_i = target_row the full-pool mean. The
-    self-class coordinate i (= diag_idx) is weighted by diag_weight: 0 matches only the off-diagonal
-    (inter-class) profile — the "how classes differ" signal the trustworthiness thesis rests on —
-    while 1.0 recovers a literal full-row R̂[i, :] ≈ R[i, :] match. No L2 normalization (probabilities
-    are already on the simplex).
+    with p_s the teacher softmax (K-dim simplex) and r_i = target_row the full-pool mean (the literal
+    full row R[i, :], self-class confidence included). No L2 normalization (probabilities are already
+    on the simplex).
 
     Greedy forward selection: maintain s1 = sum_{s in S} p_s; each step adds the candidate
-    minimizing ||w (.) ((s1 + p_j)/k - r_i)||^2, an O(P*K) scan, so the whole select is O(n*P*K).
+    minimizing ||(s1 + p_j)/k - r_i||^2, an O(P*K) scan, so the whole select is O(n*P*K).
     Deterministic; `gen` is unused (kept for a uniform variant signature).
 
     cand_probs [P, K]: the full per-class candidates' soft-labels.
@@ -335,9 +333,6 @@ def _select_relmatch(n, cand_probs, target_row, diag_weight, diag_idx, gen):
     Pc = cand_probs.double()
     P, K = Pc.shape
     r = target_row.double()
-    w = torch.ones(K, dtype=torch.float64)
-    if diag_idx is not None and 0 <= int(diag_idx) < K:
-        w[int(diag_idx)] = float(diag_weight)
 
     s1 = torch.zeros(K, dtype=torch.float64)               # running sum of selected probs
     avail = torch.ones(P, dtype=torch.bool)
@@ -346,7 +341,7 @@ def _select_relmatch(n, cand_probs, target_row, diag_weight, diag_idx, gen):
         k = float(step)
         mean = (s1.unsqueeze(0) + Pc) / k                  # [P, K] candidate-augmented mean
         diff = mean - r.unsqueeze(0)                       # [P, K]
-        J = ((diff * diff) * w.unsqueeze(0)).sum(dim=1)    # [P] weighted squared error
+        J = (diff * diff).sum(dim=1)                       # [P] full-row squared error
         J[~avail] = float("inf")
         j = int(torch.argmin(J))
         selected.append(j)
@@ -355,17 +350,115 @@ def _select_relmatch(n, cand_probs, target_row, diag_weight, diag_idx, gen):
     return torch.tensor(selected[:n], dtype=torch.long)
 
 
+def _select_reldist(n, cand_probs, target_probs, gen):
+    """v5 (Formalization 2: per-class relational *distribution*): match the whole per-class soft-label
+    distribution, not just its mean. Where relmatch matches each class's mean teacher softmax to its
+    full-pool row R[i, :] (a K-vector of means), reldist matches, on every coordinate d, the full 1-D
+    *distribution* of mass-on-d the class's crops place there, to the pool's:
+
+        minimize  J(S) = sum_d  W2^2( {p_s[d]}_{s in S},  {p_t[d]}_{t in pool} )
+
+    the per-coordinate 1-D Wasserstein-2 (sliced OT) between the selected set and the full per-class
+    pool (the full row, self-class axis included). Matching the distribution rather than the mean fixes
+    relmatch's identifiability gap (many subsets share a mean) and keeps each class's intra-class
+    sub-modes and its boundary tail. The mean match is the degenerate limit: collapse each coordinate's
+    distribution to its mean and W2^2(delta_muS, delta_mut) = (muS - mut)^2 recovers relmatch's
+    per-coordinate objective, so reldist contains Formalization 1.
+
+    Algorithm: the W2-optimal n-point quantizer of a 1-D distribution sits at its quantile levels
+    tau_k = (k - 0.5)/n, so we build the target quantile profile t_k[d] = quantile_d(tau_k) over the pool
+    (active axes only: the columns with non-trivial spread) and greedily assign each rank k to the
+    nearest unused candidate. This spreads by construction; a from-scratch greedy-W would instead pick
+    the distribution's center first and collapse. O(n * P * A) on the A active axes. Deterministic;
+    `gen` is unused (kept for a uniform variant signature).
+
+    cand_probs [P, K]: the full per-class candidates' soft-labels.
+    target_probs [M, K]: the full per-class pool whose per-axis quantiles are the target (M >= P).
+    Returns n distinct LOCAL indices into cand_probs.
+    """
+    n = min(n, cand_probs.shape[0])
+    Pc = cand_probs.double()                               # [P, K] candidates
+    Pt = target_probs.double()                             # [M, K] pool (defines per-axis quantiles)
+    P, K = Pc.shape
+
+    # active coordinates: the columns with non-trivial pool spread, so the near-constant columns of a
+    # large-K problem cost nothing and never drive the assignment.
+    active = Pt.var(dim=0, unbiased=False) > 1e-8
+    if not bool(active.any()):
+        active = torch.ones(K, dtype=torch.bool)           # degenerate fallback
+    cols = active.nonzero(as_tuple=True)[0]
+    Pc_a = Pc[:, cols]                                     # [P, A]
+    Pt_a = Pt[:, cols]                                     # [M, A]
+
+    taus = (torch.arange(1, n + 1, dtype=torch.float64) - 0.5) / n      # [n] quantile levels
+    T = torch.quantile(Pt_a, taus, dim=0)                  # [n, A] target quantile profiles
+
+    avail = torch.ones(P, dtype=torch.bool)
+    selected = []
+    for kk in range(n):
+        diff = Pc_a - T[kk].unsqueeze(0)                   # [P, A]
+        d2 = (diff * diff).sum(dim=1)                      # [P] squared distance to t_k
+        d2[~avail] = float("inf")
+        j = int(torch.argmin(d2))
+        selected.append(j)
+        avail[j] = False
+    return torch.tensor(selected[:n], dtype=torch.long)
+
+
+def _select_facloc(n, cand_emb, target_emb, gen):
+    """v6 (Formalization 3: submodular / set-level complementarity): greedy facility-location
+    coverage. Where covmatch maximizes the selected set's *volume* (log-det / DPP) and relmatch /
+    reldist match the pool's mean / per-coordinate distribution, facility-location maximizes how well
+    the selected set *covers* the full per-class pool:
+
+        F(S) = sum_{i in pool} max_{s in S} cos(e_i, e_s)
+
+    on L2-normalized embeddings (same cosine convention as _select_covmatch). F is monotone
+    submodular, so the standard greedy (add the candidate with the largest marginal coverage gain at
+    each step) carries the (1 - 1/e) guarantee. Complementarity is set-level *by construction*: a
+    candidate's value is its marginal gain
+
+        Delta(j | S) = sum_{i in pool} max(0,  cos(e_i, e_j) - max_{s in S} cos(e_i, e_s)),
+
+    i.e. it counts only what j adds over what S already covers, not any standalone score. This is the
+    formalization that literally "earns the word complementary" (thought.md, Formalization 3).
+
+    cand_emb [P, D]: the full per-class candidates' embedding (teacher soft-labels or features).
+    target_emb [M, D]: the full per-class pool to cover (M >= P; here the same pool).
+    Returns n distinct LOCAL indices into cand_emb. Deterministic; `gen` is unused (kept for a
+    uniform variant signature).
+    """
+    n = min(n, cand_emb.shape[0])
+    Zc = F.normalize(cand_emb.double(), dim=1)            # [P, D] candidates
+    Zt = F.normalize(target_emb.double(), dim=1)          # [M, D] pool to cover
+    Smat = Zt @ Zc.t()                                    # [M, P] cos(pool_i, cand_j)
+
+    covered = torch.full((Zt.shape[0],), -1.0, dtype=torch.float64)  # per-pool best cov (min cosine)
+    avail = torch.ones(Zc.shape[0], dtype=torch.bool)
+    selected = []
+    for _ in range(n):
+        gain = torch.clamp(Smat - covered.unsqueeze(1), min=0).sum(dim=0)     # [P] marginal coverage
+        gain[~avail] = float("-inf")
+        j = int(torch.argmax(gain))
+        selected.append(j)
+        avail[j] = False
+        covered = torch.maximum(covered, Smat[:, j])      # absorb j into the coverage frontier
+    return torch.tensor(selected[:n], dtype=torch.long)
+
+
 def _select_variant(method, n, dist, feats, k, gen, mean_weight=1.0,
-                    beta=0.0, qual_raw=None, probs=None, diag_weight=0.0, diag_idx=None):
+                    beta=0.0, qual_raw=None, probs=None, facloc_space="softlabel"):
     """Pick n indices (into the per-class pool) by a variance-aware rule, on CPU tensors.
 
     `dist` [P] is the per-candidate teacher CE loss (realism); `feats` [P, D] the teacher
-    penultimate features (None for relmatch, which reads soft-labels instead). All variants
+    penultimate features (None for relmatch/reldist, which read soft-labels instead). All variants
     select over the full per-class pool (the same candidates stock ranks); covmatch and
     momentmatch read the pool's feature geometry as their target. `qual_raw` [P] is the qddpp
     quality score ("lower is better"; defaults to `dist`, i.e. teacher confidence) and `beta` its
-    quality<->diversity knob. `probs` [P, K] are the teacher soft-labels read by relmatch, whose
-    full-pool mean is the target row R[i, :]; `diag_weight`/`diag_idx` set relmatch's self-class weight.
+    quality<->diversity knob. `probs` [P, K] are the teacher soft-labels read by relmatch (whose
+    full-pool mean is the target row R[i, :]) and reldist (whose full-pool per-axis *distribution* is
+    the target). facloc covers the full pool by greedy facility-location over either the soft-labels
+    (`facloc_space="softlabel"`) or the features (`facloc_space="feature"`).
     """
     eligible = torch.argsort(dist, descending=False)
     if eligible.numel() <= n:
@@ -388,14 +481,23 @@ def _select_variant(method, n, dist, feats, k, gen, mean_weight=1.0,
         local = _select_qddpp(n, feats[eligible], qr[eligible], beta, gen)
         return eligible[local]
     if method == "relmatch":
-        local = _select_relmatch(n, probs[eligible], probs.mean(0), diag_weight, diag_idx, gen)
+        local = _select_relmatch(n, probs[eligible], probs.mean(0), gen)
+        return eligible[local]
+    if method == "reldist":
+        local = _select_reldist(n, probs[eligible], probs, gen)
+        return eligible[local]
+    if method == "facloc":
+        if facloc_space == "feature":
+            local = _select_facloc(n, feats[eligible], feats, gen)
+        else:
+            local = _select_facloc(n, probs[eligible], probs, gen)
         return eligible[local]
     raise ValueError(f"unknown --select-method: {method}")
 
 
 def selector(n, model, images, labels, size, m=5, method="stock",
              k=8, rng_seed=0, mean_weight=1.0,
-             beta=0.0, quality="confidence", diag_weight=0.0):
+             beta=0.0, quality="confidence", facloc_space="softlabel"):
     """Select n crops per class from the m-crop candidates.
 
     method="stock" reproduces RDED exactly: keep the most teacher-confident crop per image,
@@ -406,10 +508,12 @@ def selector(n, model, images, labels, size, m=5, method="stock",
     feature volume against a quality score via `beta` (`quality`: "confidence" = teacher CE,
     "margin" = top1-top2 logit gap, a boundary-seeking lever). relmatch matches the class's mean
     teacher *soft-label* to its full-pool row R[i, :] (the class-relation matrix) in probability
-    space; `diag_weight` weights the self-class coordinate (0 = pure off-diagonal/inter-class).
+    space; reldist matches the full per-coordinate soft-label *distribution* to the pool's. facloc
+    greedily covers the full pool by facility-location over the soft-labels (facloc_space="softlabel",
+    the default) or the features (facloc_space="feature") — set-level complementarity.
     """
-    need_feats = method not in ("stock", "relmatch")
-    diag_idx = int(labels[0].item()) if labels.numel() else 0
+    facloc_softlabel = method == "facloc" and facloc_space == "softlabel"
+    need_feats = (method not in ("stock", "relmatch", "reldist")) and not facloc_softlabel
     with torch.no_grad():
         # [mipc, m, C, H, W]
         images = images.cuda()
@@ -437,11 +541,12 @@ def selector(n, model, images, labels, size, m=5, method="stock",
         if need_feats:
             feats = feats.reshape(m, s[0], feats.shape[1])[index, torch.arange(s[0])]
 
-        # The best crop's logits feed qddpp's "margin" quality (top1-top2 gap) and relmatch's
-        # soft-label (teacher softmax over all K classes); everything else uses teacher
-        # confidence (best_dist) as the quality / floor score.
+        # The best crop's logits feed qddpp's "margin" quality (top1-top2 gap) and the soft-label
+        # selectors' teacher softmax (relmatch/reldist, and facloc in soft-label space); everything
+        # else uses teacher confidence (best_dist) as the quality score.
+        need_probs = method in ("relmatch", "reldist") or facloc_softlabel
         best_logits = None
-        if (method == "qddpp" and quality == "margin") or method == "relmatch":
+        if (method == "qddpp" and quality == "margin") or need_probs:
             best_logits = preds.reshape(m, s[0], preds.shape[1])[index, torch.arange(s[0])]
 
         qual_raw = best_dist
@@ -449,7 +554,7 @@ def selector(n, model, images, labels, size, m=5, method="stock",
             top2 = best_logits.topk(2, dim=1).values
             qual_raw = top2[:, 0] - top2[:, 1]
 
-        probs = F.softmax(best_logits, dim=1) if method == "relmatch" else None
+        probs = F.softmax(best_logits, dim=1) if need_probs else None
 
     if method == "stock":
         sel = torch.argsort(best_dist, descending=False)[:n]
@@ -460,7 +565,7 @@ def selector(n, model, images, labels, size, m=5, method="stock",
             feats.cpu() if feats is not None else None,
             k, gen, mean_weight, beta=beta, qual_raw=qual_raw.cpu(),
             probs=probs.cpu() if probs is not None else None,
-            diag_weight=diag_weight, diag_idx=diag_idx,
+            facloc_space=facloc_space,
         )
 
     torch.cuda.empty_cache()

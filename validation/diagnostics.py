@@ -305,6 +305,125 @@ def relation_divergence(R_real, R_syn, top_m=5):
     }
 
 
+def wasserstein1d_sq(a, b):
+    """Exact 1-D squared Wasserstein-2 between two empirical samples (any sizes).
+
+    W2^2(a, b) = ∫_0^1 (F_a^{-1}(u) - F_b^{-1}(u))^2 du on the merged grid of the two samples' CDF
+    breakpoints — both quantile functions are piecewise-constant, so the integral is an exact finite
+    sum. a [m], b [P] are 1-D; returns a Python float. This is the ground-truth metric the reldist
+    selector (which picks the W2-optimal subset by quantile matching) drives down.
+    """
+    a = a.flatten().double().sort().values
+    b = b.flatten().double().sort().values
+    m, P = a.numel(), b.numel()
+    if m == 0 or P == 0:
+        return 0.0
+    cuts = torch.cat([
+        torch.arange(1, m + 1, dtype=torch.float64) / m,
+        torch.arange(1, P + 1, dtype=torch.float64) / P,
+    ]).unique(sorted=True)                                   # CDF breakpoints in (0, 1]
+    prev = torch.cat([torch.zeros(1, dtype=torch.float64), cuts[:-1]])
+    widths = cuts - prev
+    mids = (cuts + prev) / 2.0                                # interior point of each constant piece
+    ia = torch.clamp(torch.ceil(mids * m).long() - 1, 0, m - 1)
+    ib = torch.clamp(torch.ceil(mids * P).long() - 1, 0, P - 1)
+    d = a[ia] - b[ib]
+    return float((widths * d * d).sum().item())
+
+
+def _w2sq_cols(A_sorted, B_sorted):
+    """Exact 1-D W2^2 per column for column-sorted [m, C] vs [P, C] matrices, returning [C].
+
+    Identical math to `wasserstein1d_sq` applied to each column, but the CDF-breakpoint grid depends
+    only on the sample sizes (m, P) — constant across the C columns — so it is built once and shared.
+    This collapses the per-class K-coordinate (and n_proj-projection) loops into one vectorized pass.
+    """
+    m, C = A_sorted.shape
+    P = B_sorted.shape[0]
+    if m == 0 or P == 0:
+        return torch.zeros(C, dtype=torch.float64)
+    cuts = torch.cat([
+        torch.arange(1, m + 1, dtype=torch.float64) / m,
+        torch.arange(1, P + 1, dtype=torch.float64) / P,
+    ]).unique(sorted=True)                                   # CDF breakpoints in (0, 1]
+    prev = torch.cat([torch.zeros(1, dtype=torch.float64), cuts[:-1]])
+    widths = cuts - prev
+    mids = (cuts + prev) / 2.0
+    ia = torch.clamp(torch.ceil(mids * m).long() - 1, 0, m - 1)
+    ib = torch.clamp(torch.ceil(mids * P).long() - 1, 0, P - 1)
+    d = A_sorted[ia, :] - B_sorted[ib, :]                    # [G, C]
+    return (widths.unsqueeze(1) * d * d).sum(dim=0)          # [C]
+
+
+def relation_distribution_divergence(logits_real, labels_real, logits_syn, labels_syn,
+                                     num_classes, n_proj=64, seed=0):
+    """Per-class *distributional* divergence between two soft-label clouds (real reference vs distilled).
+
+    Formalization 2: where `relation_divergence` compares the class-relation *means* R[i, :], this
+    compares the full per-class soft-label *distributions* the reldist selector targets. Reports
+    (lower = closer, except the tail coverage):
+
+        reldist_w_off    mean_i  sum_{d != i} W2( p_real[i][:, d], p_syn[i][:, d] )   (headline) — the
+                         per-coordinate inter-class 1-D Wasserstein; the distribution structure a
+                         mean-only match (stock / relmatch) leaves under-matched
+        reldist_w_full   same, including the self-class axis d = i
+        reldist_sw       mean_i sliced-W2 over `n_proj` seeded random simplex directions (a
+                         parameter-light approximation of the full multivariate W2)
+        reldist_tail_cov mean_i clip( q90(max-off-diag mass | syn) / q90(max-off-diag mass | real), 0, 1 )
+                         — did each class's boundary tail (its most cross-class-confusable crops) survive?
+                         (higher = better; confidence-greedy stock collapses it toward 0)
+
+    Inputs are teacher logits + integer labels for each set; soft-labels are the row-wise softmax.
+    Pure sort-based torch, no extra deps.
+    """
+    pr = F.softmax(logits_real.detach().to(torch.float64), dim=1)
+    ps = F.softmax(logits_syn.detach().to(torch.float64), dim=1)
+    yr = labels_real.detach().long()
+    ys = labels_syn.detach().long()
+    K = int(num_classes)
+
+    g = torch.Generator().manual_seed(int(seed))
+    proj = torch.randn(K, n_proj, generator=g, dtype=torch.float64)             # [K, n_proj] directions
+    pr_proj = pr @ proj                                                        # [N_real, n_proj] (hoisted)
+    ps_proj = ps @ proj                                                        # [N_syn, n_proj]
+
+    w_off, w_full, sw, tail = [], [], [], []
+    for i in range(K):
+        rmask = yr == i
+        smask = ys == i
+        if not bool(rmask.any()) or not bool(smask.any()):
+            continue
+        Ri = pr[rmask]                                                         # [m, K]
+        Si = ps[smask]                                                         # [P, K]
+        # per-coordinate 1-D W2: sort each column once, share the (m, P) CDF grid across coordinates
+        wd = _w2sq_cols(Ri.sort(dim=0).values, Si.sort(dim=0).values).sqrt()   # [K] W2 per coordinate
+        full = float(wd.sum())
+        w_off.append(float(full - wd[i]))                                      # sum over d != i
+        w_full.append(full)
+        # sliced-W2 over the shared random projections (same grid, one sort per side)
+        Rp = pr_proj[rmask].sort(dim=0).values                                 # [m, n_proj]
+        Sp = ps_proj[smask].sort(dim=0).values                                 # [P, n_proj]
+        sw.append(float(_w2sq_cols(Rp, Sp).sqrt().sum()) / n_proj)
+        # strongest other-class mass = max over d != i, via top-2 (no per-class K-1 list / [n, K-1] copy)
+        rv, ri = Ri.topk(2, dim=1)
+        mb_r = torch.where(ri[:, 0] != i, rv[:, 0], rv[:, 1])
+        sv, si_ = Si.topk(2, dim=1)
+        mb_s = torch.where(si_[:, 0] != i, sv[:, 0], sv[:, 1])
+        q_r = torch.quantile(mb_r, 0.9)
+        q_s = torch.quantile(mb_s, 0.9)
+        tail.append(float(torch.clamp(q_s / (q_r + 1e-12), 0.0, 1.0).item()))
+
+    def _mean(xs):
+        return float(sum(xs) / len(xs)) if xs else float("nan")
+
+    return {
+        "reldist_w_off": _mean(w_off),
+        "reldist_w_full": _mean(w_full),
+        "reldist_sw": _mean(sw),
+        "reldist_tail_cov": _mean(tail),
+    }
+
+
 def fit_temperature(logits, labels):
     """Single calibration scalar T minimizing NLL of softmax(logits / T).
 

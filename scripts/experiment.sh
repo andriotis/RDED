@@ -20,11 +20,10 @@
 #                                          (passed through to main.py; default empty)
 #   --gce-q <float>                      q for the GCE term (default 0.7; recorded + keyed when gce active)
 #   --skip-synth                         pass --skip-synth to main.py (paired protocol)
-#   --select-method <name>               stage-1 selector: stock|random|stratified|covmatch|momentmatch|qddpp|relmatch
-#   --select-realism-floor <float>       eligible-pool multiplier for variance-aware selectors (default 3.0)
+#   --select-method <name>               stage-1 selector: stock|random|stratified|covmatch|momentmatch|qddpp|relmatch|reldist|facloc
 #   --select-k|--select-beta|--select-quality   stratified clusters / qddpp beta / qddpp quality (confidence|margin)
 #   --momentmatch-mean-weight <float>    momentmatch mean-vs-covariance weight
-#   --relmatch-diag-weight <float>       relmatch self-class weight (0 = off-diagonal / inter-class match)
+#   --facloc-space <softlabel|feature>   facloc coverage embedding space (default softlabel)
 #   --diagnostics                        log the trust panel (ECE/OOD/AUROC/NC), not just accuracy
 #   --ood-sets <csv> | --fit-ipc <int>   diagnostics OOD sets and Mahalanobis/temperature fit budget
 #   --results-file <path>                results JSONL (default logs/results.jsonl; --resume reads this too)
@@ -34,6 +33,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
+PYTHON_BIN="${PYTHON:-python}"
 
 DATASET=""
 ARCH=""
@@ -52,12 +52,11 @@ DRY_RUN=0
 SWEEP_NAME=""
 CELL_ID=""
 SELECT_METHOD=""
-SELECT_REALISM_FLOOR=""
 SELECT_K=""
 SELECT_BETA=""
 SELECT_QUALITY=""
+FACLOC_SPACE=""
 MOMENTMATCH_MEAN_WEIGHT=""
-RELMATCH_DIAG_WEIGHT=""
 DIAGNOSTICS=0
 OOD_SETS=""
 FIT_IPC=""
@@ -66,7 +65,7 @@ WEIGHTS_ARGS=()        # --w-<name> <val> pairs, verbatim passthrough to main.py
 USER_WEIGHTS_JSON="{}"  # collected user-set weights as JSON, used by resume key and log filename
 
 usage() {
-  sed -n '2,33p' "$0"
+  sed -n '2,32p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -88,12 +87,11 @@ while [[ $# -gt 0 ]]; do
     --sweep-name) shift; SWEEP_NAME="$1"; shift ;;
     --cell-id)    shift; CELL_ID="$1"; shift ;;
     --select-method)           shift; SELECT_METHOD="$1"; shift ;;
-    --select-realism-floor)    shift; SELECT_REALISM_FLOOR="$1"; shift ;;
     --select-k)                shift; SELECT_K="$1"; shift ;;
     --select-beta)             shift; SELECT_BETA="$1"; shift ;;
     --select-quality)          shift; SELECT_QUALITY="$1"; shift ;;
+    --facloc-space)            shift; FACLOC_SPACE="$1"; shift ;;
     --momentmatch-mean-weight) shift; MOMENTMATCH_MEAN_WEIGHT="$1"; shift ;;
-    --relmatch-diag-weight)    shift; RELMATCH_DIAG_WEIGHT="$1"; shift ;;
     --diagnostics)             DIAGNOSTICS=1; shift ;;
     --ood-sets)                shift; OOD_SETS="$1"; shift ;;
     --fit-ipc)                 shift; FIT_IPC="$1"; shift ;;
@@ -109,7 +107,7 @@ while [[ $# -gt 0 ]]; do
       name="${flag#--w-}"
       name="${name//-/_}"
       # accumulate JSON {"<name>": <val>, ...}
-      USER_WEIGHTS_JSON=$(python -c "
+      USER_WEIGHTS_JSON=$("$PYTHON_BIN" -c "
 import json, sys
 d = json.loads(sys.argv[1]); d[sys.argv[2]] = float(sys.argv[3]); print(json.dumps(d))
 " "$USER_WEIGHTS_JSON" "$name" "$val")
@@ -156,25 +154,20 @@ RESULTS_FILE_EFF="${RESULTS_FILE:-logs/results.jsonl}"
 
 # Stage-1 selector exp_name suffix — MUST mirror argument.py's exp_name construction so the per-cell
 # run-log name and the --resume key track the path-keyed distilled set (empty for stock/unset).
-SEL_SUFFIX=$(SM="$SELECT_METHOD" SB="${SELECT_BETA:-0.0}" SQ="${SELECT_QUALITY:-confidence}" \
-             DW="${RELMATCH_DIAG_WEIGHT:-0.0}" FL="${SELECT_REALISM_FLOOR:-3.0}" python - <<'PY'
+SEL_SUFFIX=$(SM="$SELECT_METHOD" SK="${SELECT_K:-8}" SB="${SELECT_BETA:-0.0}" \
+             SQ="${SELECT_QUALITY:-confidence}" FS="${FACLOC_SPACE:-softlabel}" \
+             MW="${MOMENTMATCH_MEAN_WEIGHT:-1.0}" \
+             "$PYTHON_BIN" - <<'PY'
 import os
-sm = os.environ.get("SM") or "stock"
-suf = ""
-if sm != "stock":
-    suf = f"_sel{sm}"
-    if sm == "qddpp":
-        suf += f"_b{float(os.environ['SB']):g}"
-        if os.environ.get("SQ", "confidence") != "confidence":
-            suf += f"_q{os.environ['SQ']}"
-    if sm == "relmatch":
-        dw = float(os.environ.get("DW", "0") or 0)
-        if abs(dw) > 1e-9:
-            suf += f"_dw{dw:g}"
-    fl = float(os.environ.get("FL", "3.0") or 3.0)
-    if abs(fl - 3.0) > 1e-9:
-        suf += f"_fl{fl:g}"
-print(suf)
+from validation.run_key import selector_suffix
+print(selector_suffix({
+    "select_method": os.environ.get("SM") or "stock",
+    "select_k": os.environ.get("SK") or 8,
+    "select_beta": os.environ.get("SB") or 0.0,
+    "select_quality": os.environ.get("SQ") or "confidence",
+    "facloc_space": os.environ.get("FS") or "softlabel",
+    "momentmatch_mean_weight": os.environ.get("MW") or 1.0,
+}))
 PY
 )
 
@@ -182,7 +175,7 @@ PY
 # WEIGHTS_TAG is a stable filename slug (e.g. "kl1p0_ockl0p3") of nonzero weights.
 # EXTRA_TAG slugs the non-weight hyperparams that distinguish a cell (gce_q when
 # gce is active and != default). "-" means "no extras" (keeps field count).
-read -r WEIGHTS_TAG EXTRA_TAG CANON_JSON < <(USER_JSON="$USER_WEIGHTS_JSON" GCE_Q="$GCE_Q" python - <<'PY'
+read -r WEIGHTS_TAG EXTRA_TAG CANON_JSON < <(USER_JSON="$USER_WEIGHTS_JSON" GCE_Q="$GCE_Q" "$PYTHON_BIN" - <<'PY'
 import json, os
 from validation.losses import LOSS_REGISTRY
 user = json.loads(os.environ["USER_JSON"])
@@ -199,60 +192,52 @@ print(tag, ("_".join(extras) or "-"), json.dumps(canon, sort_keys=True))
 PY
 )
 
-if [[ $RESUME -eq 1 && -f "$RESULTS_FILE_EFF" ]]; then
-  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" IPC="$IPC" SEED="$SEED" GCE_Q="$GCE_Q" SEL_SUFFIX="$SEL_SUFFIX" RESULTS_FILE_EFF="$RESULTS_FILE_EFF" python - <<'PY'
+if [[ $RESUME -eq 1 ]]; then
+  found=$(CANON_JSON="$CANON_JSON" DATASET="$DATASET" ARCH="$ARCH" STUD="$STUD_ARCH" \
+          IPC="$IPC" SEED="$SEED" FACTOR="$FACTOR" NUM_CROP="$NUM_CROP" MIPC="$MIPC" \
+          RE_EPOCHS="$RE_EPOCHS" GCE_Q="$GCE_Q" SELECT_METHOD="${SELECT_METHOD:-stock}" \
+          SELECT_K="${SELECT_K:-8}" SELECT_BETA="${SELECT_BETA:-0.0}" \
+          SELECT_QUALITY="${SELECT_QUALITY:-confidence}" \
+          FACLOC_SPACE="${FACLOC_SPACE:-softlabel}" \
+          MOMENTMATCH_MEAN_WEIGHT="${MOMENTMATCH_MEAN_WEIGHT:-1.0}" \
+          DIAGNOSTICS="$DIAGNOSTICS" OOD_SETS="$OOD_SETS" FIT_IPC="${FIT_IPC:-50}" \
+          RESULTS_FILE_EFF="$RESULTS_FILE_EFF" "$PYTHON_BIN" - <<'PY'
 import json, os
-canon = json.loads(os.environ["CANON_JSON"])
+from validation.run_key import find_completed_result, load_result_history
 
-def extras(weights, gce_q):
-    """Non-weight hyperparams that distinguish a cell. Empty -> matches legacy
-    rows (which never set these), so backward-compatible."""
-    items = []
-    if float(weights.get("gce", 0)) > 0 and gce_q is not None and float(gce_q) != 0.7:
-        items.append(("gce_q", float(gce_q)))
-    return tuple(items)
-
-new_q = os.environ.get("GCE_Q") or None
-
-def sel_suffix_of(exp_name):
-    i = (exp_name or "").find("_sel")
-    return exp_name[i:] if i >= 0 else ""
-
-key = (
-    os.environ["DATASET"], os.environ["ARCH"], os.environ["STUD"],
-    int(os.environ["IPC"]), int(os.environ["SEED"]),
-    tuple(sorted(canon.items())),
-    extras(canon, new_q),
-    os.environ.get("SEL_SUFFIX", ""),
+params = {
+    "dataset": os.environ["DATASET"],
+    "arch": os.environ["ARCH"],
+    "stud_arch": os.environ["STUD"],
+    "ipc": int(os.environ["IPC"]),
+    "seed": int(os.environ["SEED"]),
+    "factor": int(os.environ["FACTOR"]),
+    "num_crop": int(os.environ["NUM_CROP"]),
+    "mipc": int(os.environ["MIPC"]),
+    "re_epochs": int(os.environ["RE_EPOCHS"]),
+    "weights": json.loads(os.environ["CANON_JSON"]),
+    "gce_q": os.environ.get("GCE_Q") or None,
+    "select_method": os.environ["SELECT_METHOD"],
+    "select_k": os.environ["SELECT_K"],
+    "select_beta": os.environ["SELECT_BETA"],
+    "select_quality": os.environ["SELECT_QUALITY"],
+    "facloc_space": os.environ["FACLOC_SPACE"],
+    "momentmatch_mean_weight": os.environ["MOMENTMATCH_MEAN_WEIGHT"],
+    "diagnostics": os.environ["DIAGNOSTICS"] == "1",
+    "ood_sets": os.environ.get("OOD_SETS", ""),
+    "fit_ipc": os.environ.get("FIT_IPC", "50"),
+}
+match = find_completed_result(
+    params,
+    load_result_history(os.environ["RESULTS_FILE_EFF"]),
 )
-with open(os.environ["RESULTS_FILE_EFF"]) as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except Exception:
-            continue
-        if r.get("best_top1") is None:
-            continue
-        w = r.get("weights")
-        if not isinstance(w, dict):
-            continue
-        rk = (
-            r.get("dataset"), r.get("arch"), r.get("stud"),
-            r.get("ipc"), r.get("seed"),
-            tuple(sorted((k, float(v)) for k, v in w.items())),
-            extras(w, r.get("gce_q")),
-            sel_suffix_of(r.get("exp_name")),
-        )
-        if rk == key:
-            print("MATCH")
-            break
+if match:
+    print(f"MATCH\t{match['path']}\t{match['line_no']}")
 PY
 )
-  if [[ "$found" == "MATCH" ]]; then
-    echo "[skip] dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED method=${SELECT_METHOD:-stock} weights=$CANON_JSON (already in $RESULTS_FILE_EFF)"
+  if [[ "$found" == MATCH$'\t'* ]]; then
+    IFS=$'\t' read -r _match_tag match_path match_line <<< "$found"
+    echo "[skip] dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED method=${SELECT_METHOD:-stock} weights=$CANON_JSON (already in $match_path:$match_line)"
     exit 0
   fi
 fi
@@ -302,12 +287,11 @@ fi
 # Stage-1 selector + trustworthiness-diagnostics passthrough (all opt-in; absent => stock RDED
 # with no diagnostics, i.e. identical to a plain loss-term sweep).
 [[ -n "$SELECT_METHOD" ]]            && py_args+=(--select-method "$SELECT_METHOD")
-[[ -n "$SELECT_REALISM_FLOOR" ]]    && py_args+=(--select-realism-floor "$SELECT_REALISM_FLOOR")
 [[ -n "$SELECT_K" ]]                && py_args+=(--select-k "$SELECT_K")
 [[ -n "$SELECT_BETA" ]]             && py_args+=(--select-beta "$SELECT_BETA")
 [[ -n "$SELECT_QUALITY" ]]          && py_args+=(--select-quality "$SELECT_QUALITY")
+[[ -n "$FACLOC_SPACE" ]]            && py_args+=(--facloc-space "$FACLOC_SPACE")
 [[ -n "$MOMENTMATCH_MEAN_WEIGHT" ]] && py_args+=(--momentmatch-mean-weight "$MOMENTMATCH_MEAN_WEIGHT")
-[[ -n "$RELMATCH_DIAG_WEIGHT" ]]    && py_args+=(--relmatch-diag-weight "$RELMATCH_DIAG_WEIGHT")
 [[ $DIAGNOSTICS -eq 1 ]]            && py_args+=(--diagnostics)
 [[ -n "$OOD_SETS" ]]                && py_args+=(--ood-sets "$OOD_SETS")
 [[ -n "$FIT_IPC" ]]                 && py_args+=(--fit-ipc "$FIT_IPC")
@@ -325,8 +309,8 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 
 if [[ $DRY_RUN -eq 1 ]]; then
-  echo "[dry-run] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python ./main.py ${py_args[*]} -> $log"
+  echo "[dry-run] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES $PYTHON_BIN ./main.py ${py_args[*]} -> $log"
 else
   echo "[$(date +%H:%M:%S)] gpu=$CUDA_VISIBLE_DEVICES dataset=$DATASET arch=$ARCH stud=$STUD_ARCH ipc=$IPC seed=$SEED weights=$CANON_JSON -> $log"
-  python ./main.py "${py_args[@]}" 2>&1 | tee "$log"
+  "$PYTHON_BIN" ./main.py "${py_args[@]}" 2>&1 | tee "$log"
 fi

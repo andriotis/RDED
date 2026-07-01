@@ -4,10 +4,10 @@
 #   python scripts/run_sweep.py scripts/sweeps/relmatch.yaml --per-gpu 2      # run it
 #   python scripts/run_sweep.py scripts/sweeps/relmatch.yaml --resume         # skip done cells
 #
-# relmatch keeps, per class, the real crops whose mean teacher soft-label matches the class's
-# full-pool row R[i,:] of the class-relation matrix. relmatch_diag_weight=0 (default) matches the
-# off-diagonal / inter-class structure (1.0 = the literal full row). Non-stock selectors path-key
-# their distilled set (exp/<...>_selrelmatch/), so the stock control is never clobbered.
+# relmatch keeps, per class, the real crops whose mean teacher soft-label matches the class's full-pool
+# row R[i,:] of the class-relation matrix (the literal full row, self-class confidence included).
+# Non-stock selectors path-key their distilled set (exp/<...>_selrelmatch/), so the stock control is
+# never clobbered.
 #
 # diagnostics: true logs the full trust panel (ECE / OOD-AUROC / NC) next to accuracy — the metrics
 # relmatch is meant to move (first run downloads SVHN once). Results go to logs/results_select.jsonl,
@@ -35,12 +35,6 @@ experiments:
   - name: stock
     select_method: stock
 
-  # relmatch, off-diagonal (the default) — match only the inter-class soft-label structure.
-  - name: relmatch_offdiag
+  # relmatch: match each class's mean teacher soft-label to its full-pool row R[i,:].
+  - name: relmatch
     select_method: relmatch
-    relmatch_diag_weight: 0.0
-
-  # Knob ablation: match the literal full row R[i,:], self-class confidence included.
-  - name: relmatch_fullrow
-    select_method: relmatch
-    relmatch_diag_weight: 1.0

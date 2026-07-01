@@ -61,7 +61,7 @@ def init_images(args, model=None):
             mean_weight=getattr(args, "momentmatch_mean_weight", 1.0),
             beta=getattr(args, "select_beta", 0.0),
             quality=getattr(args, "select_quality", "confidence"),
-            diag_weight=getattr(args, "relmatch_diag_weight", 0.0),
+            facloc_space=getattr(args, "facloc_space", "softlabel"),
         )
         images = mix_images(images, args.input_size, args.factor, args.ipc)
         save_images(args, denormalize(images), c)
